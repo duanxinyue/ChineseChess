@@ -1,0 +1,262 @@
+/* ============ 控制面板(全端通用基础样式) ============ */
+
+.game-table td + td {
+    background: #efe9db;
+}
+
+.side-panel {
+    font-size: 12px;
+    color: #4a4030;
+}
+
+.panel-sec {
+    background: #fffdf6;
+    border: 1px solid #d9d1bd;
+    border-radius: 7px;
+    padding: 7px 8px 8px;
+    margin-bottom: 8px;
+    box-shadow: 0 1px 2px rgba(90, 70, 30, .08);
+}
+
+.sec-title {
+    font-weight: bold;
+    color: #7a6647;
+    font-size: 12px;
+    letter-spacing: 3px;
+    margin-bottom: 6px;
+    padding-bottom: 3px;
+    border-bottom: 1px dashed #e2dac6;
+}
+
+.fld {
+    display: block;
+    margin-bottom: 6px;
+}
+
+.fld-name {
+    display: block;
+    color: #8b8069;
+    font-size: 11px;
+    line-height: 16px;
+    margin-bottom: 2px;
+}
+
+.side-panel select {
+    display: block;
+    width: 100% !important;
+    box-sizing: border-box;
+    height: 26px;
+    padding: 0 3px;
+    border: 1px solid #cfc6b0;
+    border-radius: 5px;
+    background: #fff;
+    font-size: 12px;
+    color: #333;
+}
+
+.eng-status {
+    min-height: 12px;
+    font-size: 10px;
+    line-height: 13px;
+    color: #99917e;
+    margin: -2px 0 5px;
+    word-break: break-all;
+}
+
+.btn-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 1px;
+}
+
+.btn-row button,
+.record-btns input[type="button"] {
+    flex: 1;
+    padding: 5px 0;
+    border: 1px solid #c9bfa6;
+    background: linear-gradient(#fdfcf8, #f1ebdd);
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    color: #55482f;
+    white-space: nowrap;
+}
+
+.btn-row button:hover,
+.record-btns input[type="button"]:hover {
+    background: #ece4d0;
+}
+
+.btn-row button:active,
+.record-btns input[type="button"]:active {
+    background: #e2d8c0;
+}
+
+.chk-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    justify-content: flex-start;
+    margin-top: 7px;
+    padding-top: 6px;
+    border-top: 1px dashed #e8e1cd;
+}
+
+.chk-row label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    color: #55503f;
+    margin: 0;
+    font-weight: normal;
+    white-space: nowrap;
+}
+
+#selMoveList {
+    width: 100% !important;
+    box-sizing: border-box;
+    border: 1px solid #cfc6b0;
+    border-radius: 5px;
+    background: #fff;
+    font-size: 12px;
+    color: #333;
+    padding: 2px;
+}
+
+.record-btns {
+    display: flex;
+    gap: 5px;
+    margin-top: 6px;
+}
+
+/* AI 支招按钮做主视觉强调 */
+.record-btns input[type="button"]:first-child {
+    background: linear-gradient(#eaf4e4, #d3e8c8);
+    border-color: #a4c795;
+    color: #34662a;
+    font-weight: bold;
+}
+
+.record-btns input[type="button"]:first-child:hover {
+    background: #dceccf;
+}
+
+/* ============ 手机端布局：宽度 < 1024px 时启用 ============ */
+@media (max-width: 1023px) {
+    html, body {
+        -webkit-text-size-adjust: 100%;
+    }
+
+    .header, .main, .footer {
+        width: 100%;
+        box-sizing: border-box;
+    }
+    .header { padding: 0 10px; }
+    .main { padding: 0 10px; }
+
+    .header .top {
+        height: auto;
+        position: relative;
+        padding-top: 6px;
+    }
+    .logo {
+        width: 210px;
+        height: 46px;
+        background-size: contain;
+        background-position: 0 50%;
+    }
+    .header .gg {
+        position: absolute;
+        right: 0;
+        top: 6px;
+        width: calc(100% - 225px);
+        line-height: 46px;
+        font-size: 14px;
+    }
+    .header .search {
+        float: none;
+        width: 100%;
+        text-align: left;
+        padding-top: 4px;
+    }
+    .header .input-group { width: 100%; }
+    .header .login-btns { padding-top: 6px; }
+
+    .navbar, .navbar .container-fluid { padding-left: 0; padding-right: 0; }
+    .navbar-nav {
+        margin: 0;
+        white-space: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    .navbar-nav > li { float: none; display: inline-block; }
+    .navbar-nav > li > a { padding: 8px 7px; font-size: 12px; }
+
+    .location { display: none; }
+    .notice { margin-top: 8px !important; }
+
+    /* 游戏区：表格改为上下堆叠，控制台在棋盘下方 */
+    .game-wrap { height: auto; }
+    .game-wrap .inner { transform: none; }
+    .game-table, .game-table > tbody, .game-table > tr { display: block; width: 100%; }
+    .game-table > tbody > tr { display: flex; flex-direction: column; }
+    .game-table td { display: block; width: 100% !important; height: auto !important; box-sizing: border-box; }
+    .game-table td + td {
+        margin-top: 10px;
+        background: none;
+        border: none;
+        border-radius: 0;
+        padding: 0 !important;
+    }
+
+    /* 面板：对局卡两列排布，其余卡片通栏 */
+    .side-panel {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 9px;
+        align-items: start;
+    }
+    .panel-sec { margin: 0; }
+
+    .sec-game {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 7px 9px;
+    }
+    .sec-game .sec-title,
+    .sec-game .btn-row,
+    .sec-game .chk-row { grid-column: 1 / -1; }
+
+    .sec-engine { grid-column: 1 / -1; }
+    .sec-engine .fld { margin-bottom: 5px; }
+
+    .sec-record { grid-column: 1 / -1; }
+    #selMoveList { height: 110px; }
+
+    #message_area_84423 {
+        min-height: 20px;
+        text-align: center;
+        font-weight: 700;
+        font-size: 14px;
+        color: #a02020;
+    }
+
+    .panel { margin-top: 14px !important; }
+    .panel-body { font-size: 13px; }
+}
+
+/* 棋盘等比缩放到屏幕宽度 */
+@media (max-width: 545px) {
+    .game-table td:first-child {
+        height: calc((100vw - 20px) / 521 * 577px) !important;
+        overflow: hidden;
+        background: none;
+    }
+    .game-table td:first-child > div {
+        transform: scale(calc((100vw - 20px) / 521px));
+        transform-origin: top left;
+    }
+}

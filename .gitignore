@@ -1,0 +1,25 @@
+# 忽略不需要入仓的内容
+
+# 私有打包产物（不要发到公开仓库）
+Android/
+*.apk
+*.aab
+
+# 临时脚本 / 调试残留
+_shot.js
+_panel.png
+panel-check.png
+_temp_*
+.bundle-*.js
+
+# 浏览器 headless 调试目录（--user-data-dir 生成的残留）
+.chrome-*/
+.chrome/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+local.properties
+*.log

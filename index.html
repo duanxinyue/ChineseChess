@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>与电脑下象棋_象棋小游戏_在线下象棋_本地复刻版</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <meta charset="utf-8" />
+    <link rel="shortcut icon" href="favicon.ico">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="keywords" content="与电脑下象棋,象棋小游戏,中国象棋游戏,在线象棋" />
+    <meta name="description" content="无需下载直接在线与电脑下象棋,玩中国象棋游戏,可选择单人或双人游戏,残局过关,先后手等,一起玩在线象棋小游戏." />
+    <link href="css/font-awesome.css" rel="stylesheet" />
+    <link href="css/site.css" rel="stylesheet" />
+    <link href="css/mobile-app.css" rel="stylesheet" />
+
+    <style type="text/css">
+        .robot-body > h1 {
+            font-size: 16px;
+            font-weight: 700;
+            text-align: center;
+        }
+
+        /* 本地化：logo 图片路径 */
+        .logo {
+            background: url(images/logo.png) no-repeat !important;
+        }
+
+        /* 顶部右侧广告位替换为本地装饰横幅 */
+        .gg {
+            background: linear-gradient(135deg, #7d4f21, #c9984f);
+            color: #fff;
+            line-height: 60px;
+            text-align: center;
+            overflow: hidden;
+        }
+        .gg a {
+            color: #fff;
+            font-size: 18px;
+        }
+        .gg a:hover {
+            color: #ffe7b8;
+            text-decoration: none;
+        }
+
+        /* 游戏说明与页脚允许文本选中 */
+        .panel-body, .footer, .view-desc {
+            -webkit-user-select: text;
+            -moz-user-select: text;
+            -ms-user-select: text;
+            user-select: text;
+        }
+
+        /* 游戏区自适应缩放 */
+        .game-wrap {
+            width: 100%;
+            height: 612px;
+        }
+    </style>
+</head>
+<body>
+    <div class="main">
+        <script defer src="js/book.js"></script>
+        <script defer src="js/position.js"></script>
+        <script defer src="js/search.js"></script>
+        <script defer src="js/board.js"></script>
+        <script defer src="js/cchess.js"></script>
+        <script defer src="js/engine.js"></script>
+        <script defer src="js/main.js"></script>
+
+        <div style="margin-top:20px;">
+            <div id="message_area_84423"></div>
+            <div class="robot-body">
+                <h1>在线与电脑下象棋</h1>
+            </div>
+            <div class="game-wrap">
+                <div class="inner">
+                <table class="game-table" cellpadding="0" cellspacing="0" style="position: relative; margin:0 auto; ">
+                    <tr>
+                        <td style="width: 521px; height: 577px; margin:0 auto;" bgcolor="#ffffff">
+                            <div id="container"></div>
+                        </td>
+                        <td valign="top" width="170px" bgcolor="#cccccc">
+                            <div style="padding:5px;">
+                                <div class="side-panel">
+                                    <div class="panel-sec sec-game">
+                                        <div class="sec-title">对 局</div>
+                                        <label class="fld">
+                                            <span class="fld-name">谁先走</span>
+                                            <select id="selMoveMode" onchange="restart_click()">
+                                                <option selected value="0">我先走</option>
+                                                <option value="1">电脑先走</option>
+                                                <option value="2">不用电脑</option>
+                                            </select>
+                                        </label>
+                                        <label class="fld">
+                                            <span class="fld-name">先走让子</span>
+                                            <select id="selHandicap" onchange="restart_click()">
+                                                <option selected value="0">不让子</option>
+                                                <option value="1">让左马</option>
+                                                <option value="2">让双马</option>
+                                                <option value="3">让九子</option>
+                                            </select>
+                                        </label>
+                                        <div class="btn-row">
+                                            <button type="button" onclick="restart_click()">重新开始</button>
+                                            <button type="button" onclick="retract_click()">悔棋</button>
+                                        </div>
+                                        <div class="chk-row">
+                                            <label><input type="checkbox" checked onclick="board.setSound(this.checked)" />音效</label>
+                                            <label><input type="checkbox" onclick="board.setViewport(this.checked)" />对方视角</label>
+                                        </div>
+                                        <div class="chk-row">
+                                            <label class="chk"><input type="checkbox" checked id="chkUseBook" onclick="book_change(this.checked)" />开局库</label>
+                                            <label class="chk"><input type="checkbox" id="chkCrazy" onclick="crazy_change(this.checked)" />疯狂模式</label>
+                                            <label class="chk" title="勾选：长将、长捉、长期不变招不判和也不判违规，对局继续；取消：按亚洲规则判罚（长打作负、双方不变作和）"><input type="checkbox" checked id="chkAllowChase" onclick="chase_change(this.checked)" />允许长将长捉</label>
+                                        </div>
+                                    </div>
+                                    <div class="panel-sec sec-engine">
+                                        <div class="sec-title">引擎与棋力</div>
+                                        <label class="fld">
+                                            <span class="fld-name">引擎</span>
+                                            <select id="selEngine" onchange="engine_change()">
+                                                <option value="xqw" selected>象棋巫师（内置）</option>
+                                                <option value="eleeye">象眼 ElephantEye</option>
+                                                <option value="pikafish">皮卡鱼 Pikafish</option>
+                                            </select>
+                                        </label>
+                                        <div id="engStatus" class="eng-status"></div>
+                                        <label class="fld">
+                                            <span class="fld-name">电脑水平</span>
+                                            <select id="selLevel" onchange="level_change()">
+                                                <option value="200">初出茅庐</option>
+                                                <option value="400" selected>小有成就</option>
+                                                <option value="800">游刃有余</option>
+                                                <option value="1500">大显身手</option>
+                                                <option value="2500">无敌神通</option>
+                                                <option value="4000">神挡杀神</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                    <div class="panel-sec sec-record">
+                                        <div class="sec-title">记 录</div>
+                                        <select id="selMoveList" size="10" onchange="moveList_change()">
+                                            <option selected value="0">=== Start ===</option>
+                                        </select>
+                                        <div class="record-btns">
+                                            <input type="button" value="AI 支招" onclick="hint_click()" />
+                                            <input type="button" value="导出记录" onclick="export_click()" />
+                                            <input type="button" value="导入记录" onclick="import_click()" />
+                                            <input type="file" id="fileRecord" accept=".txt,.pgn,.record,text/plain" style="display:none" onchange="importFile_click()" />
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                </table>
+                </div>
+            </div>
+        </div>
+
+    
+    <script type="text/javascript" src="js/jquery.min.js"></script>
+    <script src="js/layer.min.js"></script>
+    <script src="js/bootstrap.min.js"></script>
+    <script src="js/comment.js"></script>
+</body>
+</html>
