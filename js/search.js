@@ -142,6 +142,20 @@ function Search(pos, hashLevel) {
     this.hashMask = (1 << hashLevel) - 1;
     this.pos = pos;
     this.useBook = true;
+    this.deadline = 0;
+    this.timeout = false;
+}
+
+// 硬时限检查：搜索是同步跑在主线程的，旧代码只在“每一层深度结束”后看一眼时间，
+// 单层搜起来经常远超预算（400ms 预算实测跑 2 秒多），期间界面完全卡死、点什么都没用。
+// 这里每 1024 个节点检查一次，一旦超时就逐层提前返回，保证最大阻塞 ≈ 预算时间。
+Search.prototype.pollTimeout = function() {
+    if (!this.timeout && this.deadline > 0 && (this.allNodes & 1023) == 0) {
+        if (Date.now() > this.deadline) {
+            this.timeout = true;
+        }
+    }
+    return this.timeout;
 }
 
 Search.prototype.getHashItem = function () {
@@ -221,6 +235,9 @@ Search.prototype.setBestMove = function (mv, depth) {
 Search.prototype.searchQuiesc = function (vlAlpha_, vlBeta) {
     var vlAlpha = vlAlpha_;
     this.allNodes++;
+    if (this.pollTimeout()) {
+        return vlAlpha;
+    }
     var vl = this.pos.mateValue();
     if (vl >= vlBeta) {
         return vl;
@@ -264,6 +281,9 @@ Search.prototype.searchQuiesc = function (vlAlpha_, vlBeta) {
         }
         vl = -this.searchQuiesc(-vlBeta, -vlAlpha);
         this.pos.undoMakeMove();
+        if (this.timeout) {
+            break;
+        }
         if (vl > vlBest) {
             if (vl >= vlBeta) {
                 return vl;
@@ -281,6 +301,9 @@ Search.prototype.searchFull = function (vlAlpha_, vlBeta, depth, noNull) {
         return this.searchQuiesc(vlAlpha, vlBeta);
     }
     this.allNodes++;
+    if (this.pollTimeout()) {
+        return vlAlpha;
+    }
     var vl = this.pos.mateValue();
     if (vl >= vlBeta) {
         return vl;
@@ -320,11 +343,14 @@ Search.prototype.searchFull = function (vlAlpha_, vlBeta, depth, noNull) {
             vl = -this.searchFull(-vlBeta, -vlAlpha, newDepth, false);
         } else {
             vl = -this.searchFull(-vlAlpha - 1, -vlAlpha, newDepth, false);
-            if (vl > vlAlpha && vl < vlBeta) {
+            if (!this.timeout && vl > vlAlpha && vl < vlBeta) {
                 vl = -this.searchFull(-vlBeta, -vlAlpha, newDepth, false);
             }
         }
         this.pos.undoMakeMove();
+        if (this.timeout) {
+            break;
+        }
         if (vl > vlBest) {
             vlBest = vl;
             if (vl >= vlBeta) {
@@ -342,9 +368,11 @@ Search.prototype.searchFull = function (vlAlpha_, vlBeta, depth, noNull) {
     if (vlBest == -MATE_VALUE) {
         return this.pos.mateValue();
     }
-    this.recordHash(hashFlag, vlBest, depth, mvBest);
-    if (mvBest > 0) {
-        this.setBestMove(mvBest, depth);
+    if (!this.timeout) {
+        this.recordHash(hashFlag, vlBest, depth, mvBest);
+        if (mvBest > 0) {
+            this.setBestMove(mvBest, depth);
+        }
     }
     return vlBest;
 }
@@ -354,6 +382,9 @@ Search.prototype.searchRoot = function (depth) {
     var sort = new MoveSort(this.mvResult, this.pos, this.killerTable, this.historyTable);
     var mv;
     while ((mv = sort.next()) > 0) {
+        if (this.timeout) {
+            break;
+        }
         if (!this.pos.makeMove(mv)) {
             continue;
         }
@@ -363,11 +394,15 @@ Search.prototype.searchRoot = function (depth) {
             vl = -this.searchFull(-MATE_VALUE, MATE_VALUE, newDepth, true);
         } else {
             vl = -this.searchFull(-vlBest - 1, -vlBest, newDepth, false);
-            if (vl > vlBest) {
+            if (!this.timeout && vl > vlBest) {
                 vl = -this.searchFull(-MATE_VALUE, -vlBest, newDepth, true);
             }
         }
         this.pos.undoMakeMove();
+        // 超时只接受已搜完的完整走法，不用半截结果覆盖上一层的最佳着法
+        if (this.timeout) {
+            break;
+        }
         if (vl > vlBest) {
             vlBest = vl;
             this.mvResult = mv;
@@ -378,7 +413,9 @@ Search.prototype.searchRoot = function (depth) {
             }
         }
     }
-    this.setBestMove(this.mvResult, depth);
+    if (this.mvResult > 0) {
+        this.setBestMove(this.mvResult, depth);
+    }
     return vlBest;
 }
 
@@ -415,7 +452,7 @@ Search.prototype.searchMain = function (depth, millis) {
         this.hashTable.push({ depth: 0, flag: 0, vl: 0, mv: 0, zobristLock: 0 });
     }
     this.killerTable = [];
-    for (var i = 0; i < LIMIT_DEPTH; i++) {
+    for (var i = 0; i <= LIMIT_DEPTH; i++) {
         this.killerTable.push([0, 0]);
     }
     this.historyTable = [];
@@ -425,10 +462,16 @@ Search.prototype.searchMain = function (depth, millis) {
     this.mvResult = 0;
     this.allNodes = 0;
     this.pos.distance = 0;
+    this.deadline = new Date().getTime() + millis;
+    this.timeout = false;
     var t = new Date().getTime();
     for (var i = 1; i <= depth; i++) {
         var vl = this.searchRoot(i);
         this.allMillis = new Date().getTime() - t;
+        // 超时发生时 searchRoot 中途跳出，本层结果不可信：保留上一层的最佳着法
+        if (this.timeout) {
+            break;
+        }
         if (this.allMillis > millis) {
             break;
         }
@@ -436,6 +479,20 @@ Search.prototype.searchMain = function (depth, millis) {
             break;
         }
         // 不因为重复局面提前停止搜索；按思考时间正常给出当前局面最佳着法
+    }
+    this.deadline = 0;
+    // 兜底：极端局面下第一层都没搜完，保证仍有合法走法可走，不让棋盘卡在 busy
+    if (this.mvResult <= 0) {
+        var mvs = this.pos.generateMoves(null);
+        for (var k = 0; k < mvs.length; k++) {
+            if (this.pos.makeMove(mvs[k])) {
+                this.pos.undoMakeMove();
+                if (this.pos.legalMove(mvs[k])) {
+                    this.mvResult = mvs[k];
+                    break;
+                }
+            }
+        }
     }
     return this.mvResult;
 }

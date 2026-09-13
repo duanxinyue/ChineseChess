@@ -381,10 +381,30 @@ Board.prototype.response = function () {
         this.thinkingTimer = setTimeout(function () {
             this_.thinkingTimer = 0;
             this_.search.useBook = this_.useBook;
-            var mv = this_.search.searchMain(LIMIT_DEPTH, this_.thinkMillis());
+            var mv = 0;
+            try {
+                mv = this_.search.searchMain(LIMIT_DEPTH, this_.thinkMillis());
+            } catch (e) {
+                mv = 0;
+            }
+            // 搜索异常/超时未给出走法时，用第一个合法走法兜底。
+            // 不做这层保护一旦抛异常就会跳过下面的 busy=false，棋盘永久点不动。
+            if (mv <= 0 || !this_.pos.legalMove(mv)) {
+                var mvs = this_.pos.generateMoves(null);
+                mv = 0;
+                for (var i = 0; i < mvs.length; i++) {
+                    if (this_.pos.makeMove(mvs[i])) {
+                        this_.pos.undoMakeMove();
+                        mv = mvs[i];
+                        break;
+                    }
+                }
+            }
             this_.thinking.style.visibility = "hidden";
             this_.busy = false;
-            this_.addMove(mv, true);
+            if (mv > 0) {
+                this_.addMove(mv, true);
+            }
         }, 100);
         return;
     }
@@ -397,6 +417,7 @@ Board.prototype.response = function () {
     }
 
     // WASM 引擎: 异步在 Worker 中搜索
+    // file:// 下若 WASM 引擎还没就绪/加载失败，不让棋盘卡在 busy，直接回退内置引擎走子
     EngineBridge.search(this.engineId, this.pos.toFen(), this.thinkMillis()).then(function (iccs) {
         if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
             return;
@@ -416,6 +437,33 @@ Board.prototype.response = function () {
     }).catch(function (err) {
         if (this_.thinkingSeq !== seq) {
             return;
+        }
+        // 引擎不可用时静默回退内置引擎：file:// 双击场景下不弹窗打断对局
+        if (this_.search != null && this_.result == RESULT_UNKNOWN) {
+            var mv2 = 0;
+            try {
+                this_.search.useBook = this_.useBook;
+                mv2 = this_.search.searchMain(LIMIT_DEPTH, this_.thinkMillis());
+            } catch (e2) {
+                mv2 = 0;
+            }
+            if (mv2 <= 0 || !this_.pos.legalMove(mv2)) {
+                var mvs2 = this_.pos.generateMoves(null);
+                mv2 = 0;
+                for (var i = 0; i < mvs2.length; i++) {
+                    if (this_.pos.makeMove(mvs2[i])) {
+                        this_.pos.undoMakeMove();
+                        mv2 = mvs2[i];
+                        break;
+                    }
+                }
+            }
+            this_.thinking.style.visibility = "hidden";
+            this_.busy = false;
+            if (mv2 > 0) {
+                this_.addMove(mv2, true);
+                return;
+            }
         }
         this_.thinking.style.visibility = "hidden";
         this_.busy = false;

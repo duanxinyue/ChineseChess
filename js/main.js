@@ -177,6 +177,7 @@ function hint_click() {
 }
 
 // 让当前引擎给出推荐走法（返回 Promise<内部走法>）
+// file:// 下 WASM 引擎不可用时，自动回退内置引擎，不弹窗打断
 function requestBestMove(millis) {
   return new Promise(function (resolve, reject) {
     if (board.engineId == "xqw") {
@@ -199,7 +200,26 @@ function requestBestMove(millis) {
         mv = mvs.length > 0 ? mvs[0] : 0;
       }
       resolve(mv);
-    }, reject);
+    }, function (err) {
+      var isFile = false;
+      try {
+        isFile = typeof location != "undefined" && location.protocol === "file:";
+      } catch (e) { /* ignore */ }
+      if (isFile && board.search != null) {
+        try {
+          var mv2 = board.search.searchMain(LIMIT_DEPTH, millis);
+          if (mv2 <= 0 || !board.pos.legalMove(mv2)) {
+            var mvs2 = board.pos.generateMoves();
+            mv2 = mvs2.length > 0 ? mvs2[0] : 0;
+          }
+          if (mv2 > 0) {
+            resolve(mv2);
+            return;
+          }
+        } catch (e2) { /* ignore, fall through to reject */ }
+      }
+      reject(err);
+    });
   });
 }
 

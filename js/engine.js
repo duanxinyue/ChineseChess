@@ -198,7 +198,16 @@ var EngineBridge = (function () {
     worker.postMessage({ type: "INIT" });
   }
 
-  // 优先原生 Worker; 被浏览器禁止时(file:// 页面 / 收紧的 WebView)降级 Blob Worker
+  // file:// 下浏览器直接禁止 new Worker(相对路径)，连试都不用试，直接走 Blob；
+  // http(s) 下优先原生 Worker，被收紧的 WebView 禁止时再降级 Blob。
+  function isFileProtocol() {
+    try {
+      return typeof location != "undefined" && location.protocol === "file:";
+    } catch (e) {
+      return false;
+    }
+  }
+
   function spawnWorker(id) {
     var st = state(id);
     var info = engineInfo(id);
@@ -211,22 +220,36 @@ var EngineBridge = (function () {
         reject(new Error("当前环境不支持 Web Worker，无法使用 WASM 引擎"));
         return;
       }
-      var worker = null;
-      try {
-        worker = new Worker(info.worker);
-      } catch (e) {
-        worker = null;
-      }
-      if (worker) {
-        st.mode = "native";
-        attachWorker(id, worker);
-        resolve();
-        return;
+      if (!isFileProtocol()) {
+        var worker = null;
+        try {
+          worker = new Worker(info.worker);
+        } catch (e) {
+          worker = null;
+        }
+        if (worker) {
+          st.mode = "native";
+          attachWorker(id, worker);
+          resolve();
+          return;
+        }
       }
       // 降级: 拉取离线数据包, 构建自包含 Blob Worker
       loadBundle(id).then(function (bundle) {
-        var src = buildBlobWorkerSource(id, bundle);
-        var worker2 = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+        var src;
+        try {
+          src = buildBlobWorkerSource(id, bundle);
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        var worker2 = null;
+        try {
+          worker2 = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+        } catch (e) {
+          reject(new Error("当前环境无法创建引擎线程，已回退内置引擎"));
+          return;
+        }
         st.mode = "blob";
         attachWorker(id, worker2);
         resolve();
