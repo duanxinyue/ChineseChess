@@ -98,5 +98,13 @@ self.onmessage = function (e) {
     } catch (err) {
       self.postMessage({ type: "ERROR", message: "皮卡鱼搜索失败: " + err });
     }
+  } else if (type === "STOP") {
+    // 主线程悔棋/重开/换引擎时取消旧思考：正在跑的 go 用 stop 指令打断（UCI 标准指令）
+    searchPending = null;
+    if (engineModule) {
+      try {
+        engineModule.sendCommand("stop");
+      } catch (err) { /* ignore */ }
+    }
   }
 };

@@ -24,10 +24,10 @@ Worker 双通道:
 var ENGINE_LIST = [
   { id: "xqw", name: "象棋巫师（内置 JS）", wasm: false },
   { id: "eleeye", name: "象眼 ElephantEye（WASM）", wasm: true,
-    worker: "js/engines/eleeye/eleeye.worker.js?v=7",
+    worker: "js/engines/eleeye/eleeye.worker.js?v=9",
     bundle: "js/engines/eleeye/eleeye-bundle.js", bundleGlobal: "ELEEYE_BUNDLE" },
   { id: "pikafish", name: "皮卡鱼 Pikafish（WASM）", wasm: true,
-    worker: "js/engines/pikafish/pikafish.worker.js?v=8",
+    worker: "js/engines/pikafish/pikafish.worker.js?v=10",
     bundle: "js/engines/pikafish/pikafish-bundle.js", bundleGlobal: "PIKAFISH_BUNDLE" }
 ];
 var FEN_EXTRA = " - - 0 1";
@@ -65,7 +65,9 @@ function buildBlobWorkerSource(id, bundle) {
       "  if(pendingSearch&&engine){var p0=pendingSearch;pendingSearch=null;runSearch(p0);}}",
       " else if(line.indexOf('bestmove')===0){var p=line.split(/\\s+/);self.postMessage({type:'BEST_MOVE',move:(p.length>1?p[1]:''),seq:lastSeq});}",
       "}",
+      "function stopSearch(){try{if(engine){engine.sendCommand('stop');}}catch(e0){}}",
       "self.onmessage=function(e){var d=e.data||{};",
+      " if(d.type==='STOP'){stopSearch();pendingSearch=null;return;}",
       " if(d.type==='SEARCH'){pendingSearch={fen:d.fen,movetime:d.movetime||500,seq:d.seq,allowChase:d.allowChase};",
       "  if(engine){var q=pendingSearch;pendingSearch=null;runSearch(q);}}}",
       "try{",
@@ -96,6 +98,7 @@ function buildBlobWorkerSource(id, bundle) {
     " try{var fen=(d.fen.indexOf(' - ')<0)?d.fen+' - - 0 1':d.fen;cmd('position fen '+fen);cmd('go movetime '+(d.movetime||500));}",
     " catch(err){postErr('象眼搜索失败: '+err);}}",
     "self.onmessage=function(e){var d=e.data||{};",
+    " if(d.type==='STOP'){cmd('stop');pendingSearch=null;return;}",
     " if(d.type==='SEARCH'){pendingSearch={fen:d.fen,movetime:d.movetime||500,seq:d.seq};if(engine){var q=pendingSearch;pendingSearch=null;runSearch(q);}}}",
     "try{",
     " (0, eval)(ENGINE_SRC);",
@@ -206,6 +209,13 @@ var EngineBridge = (function () {
         st.seq = 0;
       }
     } else if (d.type === "BEST_MOVE") {
+      // 迟到的旧搜索结果（悔棋/重开/换引擎/看门狗兜底后才回来）直接丢弃：
+      // 上层 board.js 用 thinkingSeq 守卫，这里把已失效的 seq 一并清理，双保险
+      if (d.seq !== undefined && d.seq !== null && st.seq && d.seq !== st.seq) {
+        delete searches[d.seq];
+        delete searches[d.seq + ":reject"];
+        return;
+      }
       deliver(id, d);
     }
   }
@@ -323,6 +333,23 @@ var EngineBridge = (function () {
     return st.promise;
   }
 
+  // 取消指定引擎正在进行的搜索：悔棋/重开/换引擎/看门狗兜底时调用。
+  // 让 Worker 停掉旧思考（UCI/UCCI 的 stop 指令），并清理主线程挂起的旧 seq，
+  // 避免迟到的 BEST_MOVE 污染新局面。
+  function stop(id) {
+    var st = state(id);
+    if (st.seq) {
+      delete searches[st.seq];
+      delete searches[st.seq + ":reject"];
+      st.seq = 0;
+    }
+    if (st.worker) {
+      try {
+        st.worker.postMessage({ type: "STOP" });
+      } catch (e) { /* worker 可能已销毁，忽略 */ }
+    }
+  }
+
   function unload(id) {
     var st = state(id);
     if (id === "xqw") {
@@ -421,6 +448,7 @@ var EngineBridge = (function () {
   return {
     load: load,
     unload: unload,
+    stop: stop,
     search: search,
     supported: supported,
     displayName: displayName,

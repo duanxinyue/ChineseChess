@@ -170,6 +170,8 @@ Board.prototype.setEngine = function (id) {
     if (typeof EngineBridge != "undefined") {
         var old = this.engineId;
         if (old !== id && EngineBridge.supported(old) && old !== "xqw") {
+            // 先停掉旧引擎正在跑的搜索再卸载，迟到的 BEST_MOVE 不会污染新引擎局面
+            EngineBridge.stop(old);
             EngineBridge.unload(old);
         }
         if (!EngineBridge.supported(id)) {
@@ -558,6 +560,13 @@ Board.prototype.cancelThinking = function () {
     this.thinkingSeq = (this.thinkingSeq + 1) & 0xffff;
     this.hintSeq = (this.hintSeq + 1) & 0xffff;
     this.clearBusyWatchdog();
+    // 停掉 WASM 引擎正在跑的搜索：悔棋/重开时旧思考必须真正停止，
+    // 否则它的迟到 BEST_MOVE 会和新局面串在一起，把 busy 卡死
+    if (typeof EngineBridge != "undefined" && this.engineId != "xqw" && this.engineId) {
+        try {
+            EngineBridge.stop(this.engineId);
+        } catch (e) { /* ignore */ }
+    }
     if (this.thinkingTimer) {
         clearTimeout(this.thinkingTimer);
         this.thinkingTimer = 0;

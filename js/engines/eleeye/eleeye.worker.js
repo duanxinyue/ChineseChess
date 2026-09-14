@@ -69,6 +69,7 @@ self.onmessage = function (e) {
   } else if (type === 'STOP') {
     // 主线程换引擎/悔棋/重开/看门狗兜底时取消旧思考：
     // 正在跑的 go 用 stop 指令打断（UCCI 标准指令）。
+    pendingSearch = null;
     sendUCCICmdToEngine('stop');
   }
 };
