@@ -506,9 +506,19 @@ Board.prototype.response = function () {
         this_.busy = false;
         this_.busySince = 0;
         var mv = iccs2Move(String(iccs || ""));
-        if (mv <= 0 || !this_.pos.legalMove(mv)) {
-            // 引擎着法无效时取第一个"真正合法"的走法兜底，
-            // 不能直接用 generateMoves()[0]（可能是伪合法，如送将，会被 addMove 拒绝导致 busy 卡死）
+        var ok = false;
+        if (mv > 0 && this_.pos.legalMove(mv)) {
+            // legalMove 只保证不是吃己方将，必须用 makeMove 实测（送将会被拒绝）。
+            // 引擎切引擎/重开后可能返回与当前局面不符的"鬼步"，
+            // 不实测就直接 addMove 会被静默拒绝，电脑回合无人接管 → 棋盘永久卡死。
+            ok = this_.pos.makeMove(mv);
+            if (ok) {
+                this_.pos.undoMakeMove();
+            } else {
+                mv = 0;
+            }
+        }
+        if (!ok) {
             var mvs = this_.pos.generateMoves(null);
             mv = 0;
             for (var i = 0; i < mvs.length; i++) {
@@ -519,6 +529,7 @@ Board.prototype.response = function () {
                 }
             }
             if (mv <= 0) {
+                alertDelay("引擎返回非法着法且无合法走法，请点“重新开始”。");
                 return;
             }
         }

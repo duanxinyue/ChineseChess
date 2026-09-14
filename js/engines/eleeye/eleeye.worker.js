@@ -12,6 +12,7 @@ var wasmModule = null;
 var lastSeq = 0;
 var pendingSearch = null;
 var stopPending = false;
+var engineSearching = false;
 
 // 使用 Emscripten 工厂模式异步初始化象眼 WASM 模块
 try {
@@ -66,13 +67,22 @@ self.onmessage = function (e) {
       pendingSearch = { fen: fen, movetime: movetime, seq: lastSeq };
       return;
     }
+    if (engineSearching) {
+      // 旧 go 还挂着：先 stop，等它的 bestmove 被吞掉后补执行新搜索
+      pendingSearch = { fen: fen, movetime: movetime, seq: lastSeq };
+      stopPending = true;
+      sendUCCICmdToEngine('stop');
+      return;
+    }
     executeSearch(fen, movetime);
   } else if (type === 'STOP') {
     // 主线程换引擎/悔棋/重开/看门狗兜底时取消旧思考：
     // 正在跑的 go 用 stop 指令打断（UCCI 标准指令）。
-    // 置 stopPending，吞掉引擎被打断后吐出的那条 bestmove（见 handleEngineStdoutLine）。
+    // 只有引擎确实在搜索时才置 stopPending，空闲时乱置会吞掉下次正常 bestmove。
     pendingSearch = null;
-    stopPending = true;
+    if (engineSearching) {
+      stopPending = true;
+    }
     sendUCCICmdToEngine('stop');
   }
 };
@@ -88,7 +98,16 @@ function sendUCCICmdToEngine(cmd) {
   }
 }
 
+function drainPendingSearch() {
+  if (pendingSearch && wasmModule && !engineSearching) {
+    var p = pendingSearch;
+    pendingSearch = null;
+    executeSearch(p.fen, p.movetime);
+  }
+}
+
 function executeSearch(fen, movetime) {
+  engineSearching = true;
   sendUCCICmdToEngine(`position fen ${fen}`);
   sendUCCICmdToEngine(`go movetime ${movetime}`);
 }
@@ -131,8 +150,10 @@ function handleEngineStdoutLine(line) {
     // 必须吞掉，否则它会顶着新搜索的 seq 被主线程当成新着法接受，污染新局面。
     if (stopPending) {
       stopPending = false;
+      engineSearching = false;
       currentSearchStats = null;
       maxSearchDepth = 0;
+      drainPendingSearch();
       return;
     }
     const parts = line.split(/\s+/);
@@ -143,6 +164,7 @@ function handleEngineStdoutLine(line) {
     if (maxSearchDepth > 0) {
       currentSearchStats.depth = maxSearchDepth;
     }
+    engineSearching = false;
     self.postMessage({
       type: 'BEST_MOVE',
       move: bestMove,
@@ -151,6 +173,7 @@ function handleEngineStdoutLine(line) {
     });
     currentSearchStats = null;
     maxSearchDepth = 0;
+    drainPendingSearch();
   }
 }
 
