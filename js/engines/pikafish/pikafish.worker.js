@@ -19,6 +19,7 @@ importScripts('pikafish.js');
 var engineModule = null;
 var stdoutReady = false;
 var searchPending = null;
+var stopPending = false;
 
 function postOut(line) {
   line = String(line || "").replace(/[\r\n]+$/, "");
@@ -34,6 +35,13 @@ function postOut(line) {
       self.onmessage({ data: { type: "SEARCH", fen: p.fen, movetime: p.movetime, seq: p.seq, allowChase: p.allowChase } });
     }
   } else if (line.indexOf("bestmove") === 0) {
+    // stop 指令后引擎吐出的第一条 bestmove 属于被打断的旧搜索：
+    // 必须吞掉，否则它会顶着新搜索的 seq 被主线程当成新着法接受，
+    // 走出与当前局面不符的"鬼步"，棋盘从此停在电脑回合一动不动。
+    if (stopPending) {
+      stopPending = false;
+      return;
+    }
     var parts = line.split(/\s+/);
     self.postMessage({ type: "BEST_MOVE", move: parts.length > 1 ? parts[1] : "", seq: lastSeq });
   } else if (line.indexOf("info ") === 0) {
@@ -99,8 +107,10 @@ self.onmessage = function (e) {
       self.postMessage({ type: "ERROR", message: "皮卡鱼搜索失败: " + err });
     }
   } else if (type === "STOP") {
-    // 主线程悔棋/重开/换引擎时取消旧思考：正在跑的 go 用 stop 指令打断（UCI 标准指令）
+    // 主线程悔棋/重开/换引擎时取消旧思考：正在跑的 go 用 stop 指令打断（UCI 标准指令）。
+    // 置 stopPending，吞掉引擎被打断后吐出的那条 bestmove（见 postOut）。
     searchPending = null;
+    stopPending = true;
     if (engineModule) {
       try {
         engineModule.sendCommand("stop");

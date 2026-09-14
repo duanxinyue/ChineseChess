@@ -507,10 +507,18 @@ Board.prototype.response = function () {
         this_.busySince = 0;
         var mv = iccs2Move(String(iccs || ""));
         if (mv <= 0 || !this_.pos.legalMove(mv)) {
-            var mvs = this_.pos.generateMoves();
-            if (mvs.length > 0) {
-                mv = mvs[0];
-            } else {
+            // 引擎着法无效时取第一个"真正合法"的走法兜底，
+            // 不能直接用 generateMoves()[0]（可能是伪合法，如送将，会被 addMove 拒绝导致 busy 卡死）
+            var mvs = this_.pos.generateMoves(null);
+            mv = 0;
+            for (var i = 0; i < mvs.length; i++) {
+                if (this_.pos.makeMove(mvs[i])) {
+                    this_.pos.undoMakeMove();
+                    mv = mvs[i];
+                    break;
+                }
+            }
+            if (mv <= 0) {
                 return;
             }
         }

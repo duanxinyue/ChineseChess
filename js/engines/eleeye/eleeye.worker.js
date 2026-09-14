@@ -11,6 +11,7 @@
 var wasmModule = null;
 var lastSeq = 0;
 var pendingSearch = null;
+var stopPending = false;
 
 // 使用 Emscripten 工厂模式异步初始化象眼 WASM 模块
 try {
@@ -69,7 +70,9 @@ self.onmessage = function (e) {
   } else if (type === 'STOP') {
     // 主线程换引擎/悔棋/重开/看门狗兜底时取消旧思考：
     // 正在跑的 go 用 stop 指令打断（UCCI 标准指令）。
+    // 置 stopPending，吞掉引擎被打断后吐出的那条 bestmove（见 handleEngineStdoutLine）。
     pendingSearch = null;
+    stopPending = true;
     sendUCCICmdToEngine('stop');
   }
 };
@@ -124,6 +127,14 @@ function handleEngineStdoutLine(line) {
   }
   // 2. 解析引擎最终决策 bestmove 消息
   else if (line.startsWith('bestmove')) {
+    // stop 指令后引擎吐出的第一条 bestmove 属于被打断的旧搜索：
+    // 必须吞掉，否则它会顶着新搜索的 seq 被主线程当成新着法接受，污染新局面。
+    if (stopPending) {
+      stopPending = false;
+      currentSearchStats = null;
+      maxSearchDepth = 0;
+      return;
+    }
     const parts = line.split(/\s+/);
     const bestMove = parts[1];
     if (!currentSearchStats) {
