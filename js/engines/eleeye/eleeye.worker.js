@@ -10,6 +10,7 @@
 
 var wasmModule = null;
 var lastSeq = 0;
+var pendingSearch = null;
 
 // 使用 Emscripten 工厂模式异步初始化象眼 WASM 模块
 try {
@@ -32,6 +33,12 @@ try {
       // UCCI 握手: 必须先发 ucci, 引擎才响应 position/go
       sendUCCICmdToEngine('ucci');
       self.postMessage({ type: 'READY' });
+      // 就绪后补执行排队的搜索
+      if (pendingSearch) {
+        var p0 = pendingSearch;
+        pendingSearch = null;
+        executeSearch(p0.fen, p0.movetime);
+      }
     }).catch(function (err) {
       console.error('象眼 WASM 模块实例化失败:', err);
     });
@@ -53,9 +60,9 @@ self.onmessage = function (e) {
     const movetime = data.movetime || 5000;
     lastSeq = data.seq || lastSeq;
 
-    // 未就绪时直接丢弃：SEARCH 只由主线程在 READY 后下发一次（见 engine.js），
-    // Worker 不再排队补发，避免 READY 前后各 go 一次、第二个 bestmove 顶掉第一个。
+    // 未就绪时排队：READY 后补执行，不丢搜索（丢了主线程就永远等不到 BEST_MOVE）
     if (!wasmModule) {
+      pendingSearch = { fen: fen, movetime: movetime, seq: lastSeq };
       return;
     }
     executeSearch(fen, movetime);

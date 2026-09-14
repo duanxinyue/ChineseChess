@@ -232,17 +232,9 @@ function engine_change() {
     id = "xqw";
   }
   var prevId = board.engineId;
-  // 中途换引擎不重开棋局: 先停掉旧引擎正在跑的搜索，再取消旧引擎的思考，
-  // 保持当前局面继续。不断旧思考，它的迟到 BEST_MOVE 会污染新局面。
-  if (typeof EngineBridge != "undefined" && prevId != "xqw" && prevId !== id) {
-    try {
-      EngineBridge.stop(prevId);
-    } catch (e) { /* ignore */ }
-  }
+  // 中途换引擎不重开棋局: 取消旧引擎的思考, 保持当前局面继续
   board.setEngine(id);
   board.busy = false;
-  board.busySince = 0;
-  board.clearBusyWatchdog();
   board.thinking.style.visibility = "hidden";
   try {
     localStorage.setItem("xiangqi_engine", id);
