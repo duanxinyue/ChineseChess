@@ -18,7 +18,6 @@ importScripts('pikafish.js');
 
 var engineModule = null;
 var stdoutReady = false;
-var searchPending = null;
 
 function postOut(line) {
   line = String(line || "").replace(/[\r\n]+$/, "");
@@ -27,12 +26,6 @@ function postOut(line) {
   }
   if (line.indexOf("uciok") >= 0) {
     self.postMessage({ type: "READY" });
-    // 引擎刚就绪：把 INIT->SEARCH 间隙排队的搜索补执行
-    if (searchPending && engineModule) {
-      var p = searchPending;
-      searchPending = null;
-      self.onmessage({ data: { type: "SEARCH", fen: p.fen, movetime: p.movetime, seq: p.seq } });
-    }
   } else if (line.indexOf("bestmove") === 0) {
     var parts = line.split(/\s+/);
     self.postMessage({ type: "BEST_MOVE", move: parts.length > 1 ? parts[1] : "", seq: lastSeq });
@@ -77,11 +70,9 @@ self.onmessage = function (e) {
     }
   } else if (type === "SEARCH") {
     lastSeq = data.seq || lastSeq;
+    // 未就绪时直接丢弃：SEARCH 只由主线程在 READY 后下发一次（见 engine.js），
+    // Worker 不再排队补发，避免 READY 前后各 go 一次、第二个 bestmove 顶掉第一个。
     if (!engineModule) {
-      // 引擎还没就绪：把搜索排队，等 uciok/READY 后补执行。
-      // 原先直接 return 会丢掉这次搜索，主线程永远等不到 BEST_MOVE，
-      // 棋盘 busy 锁死、点哪都没用。
-      searchPending = { fen: data.fen, movetime: data.movetime || 500, seq: data.seq };
       return;
     }
     try {
@@ -98,6 +89,14 @@ self.onmessage = function (e) {
       engineModule.sendCommand("go movetime " + (data.movetime || 500));
     } catch (err) {
       self.postMessage({ type: "ERROR", message: "皮卡鱼搜索失败: " + err });
+    }
+  } else if (type === "STOP") {
+    // 主线程换引擎/悔棋/重开/看门狗兜底时取消旧思考：
+    // 正在跑的 go 用 stop 指令打断（UCI 标准指令）。
+    if (engineModule) {
+      try {
+        engineModule.sendCommand("stop");
+      } catch (err) { /* ignore */ }
     }
   }
 };

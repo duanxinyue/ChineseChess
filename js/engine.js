@@ -52,10 +52,9 @@ function buildBlobWorkerSource(id, bundle) {
       "var ENGINE_SRC=" + js(bundle.js) + ";",
       "function b64ToU8(s){var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}",
       "function postErr(m){self.postMessage({type:'ERROR',message:m});}",
-      "var engine=null,lastSeq=0,pendingSearch=null;",
+      "var engine=null,lastSeq=0;",
       "function onOut(line){line=String(line||'').replace(/[\\r\\n]+$/,'');if(!line)return;",
-      " if(line.indexOf('uciok')>=0){self.postMessage({type:'READY'});",
-      "  if(pendingSearch&&engine){var p0=pendingSearch;pendingSearch=null;runSearch(p0);}}",
+      " if(line.indexOf('uciok')>=0){self.postMessage({type:'READY'});}",
       " else if(line.indexOf('bestmove')===0){var p=line.split(/\\s+/);self.postMessage({type:'BEST_MOVE',move:(p.length>1?p[1]:''),seq:lastSeq});}",
       "}",
       "function runSearch(d){if(!engine||!d||!d.fen){return;}lastSeq=d.seq||lastSeq;",
@@ -66,8 +65,8 @@ function buildBlobWorkerSource(id, bundle) {
       "  engine.sendCommand('position fen '+fen);engine.sendCommand('go movetime '+(d.movetime||500));}",
       " catch(err){postErr('皮卡鱼搜索失败: '+err);}}",
       "self.onmessage=function(e){var d=e.data||{};",
-      " if(d.type==='SEARCH'){pendingSearch={fen:d.fen,movetime:d.movetime||500,seq:d.seq,allowChase:d.allowChase};",
-      "  if(engine){var q=pendingSearch;pendingSearch=null;runSearch(q);}}}",
+      " if(d.type==='STOP'){try{engine.sendCommand('stop');}catch(e){}return;}",
+      " if(d.type==='SEARCH'){if(!engine){return;}runSearch(d);}}",
       "try{",
       " (0, eval)(ENGINE_SRC);",
       " var cfg={locateFile:function(p){return p;},wasmBinary:b64ToU8(WASM_B64),",
@@ -87,7 +86,7 @@ function buildBlobWorkerSource(id, bundle) {
     "var ENGINE_SRC=" + js(bundle.js) + ";",
     "function b64ToU8(s){var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}",
     "function postErr(m){self.postMessage({type:'ERROR',message:m});}",
-    "var engine=null,lastSeq=0,pendingSearch=null;",
+    "var engine=null,lastSeq=0;",
     "function onOut(line){line=String(line||'').trim();if(!line)return;",
     " if(line.indexOf('bestmove')===0){var p=line.split(/\\s+/);self.postMessage({type:'BEST_MOVE',move:(p.length>1?p[1]:''),seq:lastSeq});}",
     "}",
@@ -96,7 +95,8 @@ function buildBlobWorkerSource(id, bundle) {
     " try{var fen=(d.fen.indexOf(' - ')<0)?d.fen+' - - 0 1':d.fen;cmd('position fen '+fen);cmd('go movetime '+(d.movetime||500));}",
     " catch(err){postErr('象眼搜索失败: '+err);}}",
     "self.onmessage=function(e){var d=e.data||{};",
-    " if(d.type==='SEARCH'){pendingSearch={fen:d.fen,movetime:d.movetime||500,seq:d.seq};if(engine){var q=pendingSearch;pendingSearch=null;runSearch(q);}}}",
+    " if(d.type==='STOP'){cmd('stop');return;}",
+    " if(d.type==='SEARCH'){if(!engine){return;}runSearch(d);}}",
     "try{",
     " (0, eval)(ENGINE_SRC);",
     " createEleeyeModule({noInitialRun:true,print:onOut,printErr:function(){},",
@@ -105,7 +105,6 @@ function buildBlobWorkerSource(id, bundle) {
     " }).then(function(mod){engine=mod;",
     "  if(typeof engine.ccall==='function'){try{engine.ccall('init_eleeye_engine',null,[],[]);cmd('ucci');}catch(e3){postErr(String(e3));}}",
     "  self.postMessage({type:'READY'});",
-    "  if(pendingSearch){var p0=pendingSearch;pendingSearch=null;runSearch(p0);}",
     " }).catch(function(err){postErr('象眼加载失败: '+err);});",
     "}catch(err){postErr('象眼加载失败: '+err);}"
   ].join("\n");
@@ -149,7 +148,7 @@ var EngineBridge = (function () {
 
   function state(id) {
     if (!states[id]) {
-      states[id] = { worker: null, mode: null, ready: false, promise: null, rejectTimer: null, error: null, seq: 0, _resolve: null, _reject: null };
+      states[id] = { worker: null, mode: null, ready: false, promise: null, rejectTimer: null, error: null, seq: 0, pendingDispatched: false, _resolve: null, _reject: null };
     }
     return states[id];
   }
@@ -204,9 +203,34 @@ var EngineBridge = (function () {
       if (st.seq) {
         failSearch(id, st.seq, new Error(st.error));
         st.seq = 0;
+        st.pendingDispatched = false;
       }
     } else if (d.type === "BEST_MOVE") {
+      // 迟到的旧搜索结果（换引擎/悔棋/重开后才回来）直接丢弃，
+      // 上层同样用 thinkingSeq 守卫，这里双保险，不让旧着法污染新局面。
+      if (d.seq !== undefined && d.seq !== null && st.seq && d.seq !== st.seq) {
+        delete searches[d.seq];
+        delete searches[d.seq + ":reject"];
+        return;
+      }
       deliver(id, d);
+    }
+  }
+
+  // 取消指定引擎正在进行的搜索：换引擎/悔棋/重开/看门狗兜底时调用，
+  // 让 Worker 停掉旧思考，并清理主线程挂起的旧 seq，避免迟到 BEST_MOVE 污染新局面。
+  function stop(id) {
+    var st = state(id);
+    if (st.seq) {
+      delete searches[st.seq];
+      delete searches[st.seq + ":reject"];
+      st.seq = 0;
+    }
+    st.pendingDispatched = false;
+    if (st.worker) {
+      try {
+        st.worker.postMessage({ type: "STOP" });
+      } catch (e) { /* worker 可能已销毁，忽略 */ }
     }
   }
 
@@ -226,6 +250,7 @@ var EngineBridge = (function () {
       if (st.seq) {
         failSearch(id, st.seq, new Error(st.error));
         st.seq = 0;
+        st.pendingDispatched = false;
       }
     };
     worker.postMessage({ type: "INIT" });
@@ -340,6 +365,7 @@ var EngineBridge = (function () {
     st.promise = null;
     st.error = null;
     st.seq = 0;
+    st.pendingDispatched = false;
     st._resolve = null;
     st._reject = null;
   }
@@ -356,27 +382,37 @@ var EngineBridge = (function () {
       };
 
       var run = function () {
-        // 引擎还没就绪：把搜索排队，主线程的 failFast + 超时兜底会管住它；
-        // Worker 侧就绪后也会补执行排队的 SEARCH（见各 worker 的 pendingSearch），
-        // 两边配合，保证这次走子一定有 BEST_MOVE 或 reject，不锁棋盘。
+        // 引擎就绪前只排队一次：主线程记下 seq 并等 load 成功后下发 SEARCH，
+        // Worker 侧不再重复补发（旧的双下发会导致 uci 引擎连续 go 两次、
+        // 第二个 bestmove 顶掉第一个，seq 错乱后棋盘收不到正确回调）。
+        // 无论哪条路，保证这次走子一定有 BEST_MOVE 或 reject，不锁棋盘。
         if (!st.worker || !st.ready) {
           st.seq = seq;
-          load(id).then(function () {
-            if (state(id).ready && state(id).worker && searches[seq]) {
-              st.seq = seq;
-              try {
-                state(id).worker.postMessage({
-                  type: "SEARCH",
-                  fen: fen.indexOf(" - ") < 0 ? fen + FEN_EXTRA : fen,
-                  movetime: movetime || 500,
-                  seq: seq,
-                  allowChase: ruleOpts.allowChase !== false
-                });
-              } catch (e) {
-                failFast(e);
+          if (!st.pendingDispatched) {
+            st.pendingDispatched = true;
+            load(id).then(function () {
+              st.pendingDispatched = false;
+              if (state(id).ready && state(id).worker && searches[seq]) {
+                st.seq = seq;
+                try {
+                  state(id).worker.postMessage({
+                    type: "SEARCH",
+                    fen: fen.indexOf(" - ") < 0 ? fen + FEN_EXTRA : fen,
+                    movetime: movetime || 500,
+                    seq: seq,
+                    allowChase: ruleOpts.allowChase !== false
+                  });
+                } catch (e) {
+                  failFast(e);
+                }
               }
-            }
-          }, failFast);
+            }, function (err) {
+              st.pendingDispatched = false;
+              failFast(err);
+            });
+          } else {
+            load(id).then(function () { /* 首个排队者会下发 SEARCH */ }, failFast);
+          }
           // 兜底超时: 正常应在 movetime 前后返回
           setTimeout(function () {
             failFast(new Error("引擎思考超时"));
@@ -421,6 +457,7 @@ var EngineBridge = (function () {
   return {
     load: load,
     unload: unload,
+    stop: stop,
     search: search,
     supported: supported,
     displayName: displayName,

@@ -81,8 +81,10 @@ function Board(container, images, sounds) {
     this.allowChase = true;
     this.result = RESULT_UNKNOWN;
     this.busy = false;
+    this.busySince = 0;
     this.thinkingTimer = 0;
     this.thinkingSeq = 0;
+    this.busyWatchdog = 0;
     this.animTimer = 0;
     this.animImg = null;
     this.animSq = 0;
@@ -139,7 +141,12 @@ Board.prototype.playSound = function (soundFile) {
         return;
     }
     try {
-        new Audio(this.sounds + soundFile + ".wav").play();
+        // 无头/未交互环境下 play() 会 reject（NotAllowedError），必须吞掉，
+        // 否则未捕获的 promise rejection 会打断后续走子回调。
+        var p = new Audio(this.sounds + soundFile + ".wav").play();
+        if (p && typeof p.catch === "function") {
+            p.catch(function () { /* ignore autoplay policy */ });
+        }
     } catch (e) {
         this.dummy.innerHTML = "<embed src=\"" + this.sounds + soundFile +
             ".wav\" hidden=\"true\" autostart=\"true\" loop=\"false\" />";
@@ -357,9 +364,73 @@ Board.prototype.postMate = function (computerMove) {
     this.busy = false;
 }
 
+// busy 看门狗：电脑思考超时没有任何回调时，强制用内置引擎走一步，
+// 棋盘永远不会永久锁死。超时阈值 = 本步思考预算 + 15s 引擎兜底 + 5s 余量。
+Board.prototype.armBusyWatchdog = function (seq) {
+    this.clearBusyWatchdog();
+    var this_ = this;
+    var budget = 0;
+    try {
+        budget = this.thinkMillis();
+    } catch (e) {
+        budget = this.millis || 400;
+    }
+    var timeout = (budget || 400) + 20000;
+    this.busyWatchdog = setTimeout(function () {
+        this_.busyWatchdog = 0;
+        if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN || !this_.busy) {
+            return;
+        }
+        // 看门狗触发：先停掉旧引擎可能迟到的 BEST_MOVE，再用内置引擎兜底走子
+        this_.thinkingSeq = (this_.thinkingSeq + 1) & 0xffff;
+        if (typeof EngineBridge != "undefined" && this_.engineId != "xqw") {
+            try {
+                EngineBridge.stop(this_.engineId);
+            } catch (e) { /* ignore */ }
+        }
+        var mv2 = 0;
+        try {
+            if (this_.search != null) {
+                this_.search.useBook = this_.useBook;
+                mv2 = this_.search.searchMain(LIMIT_DEPTH, this_.thinkMillis());
+            }
+        } catch (e2) {
+            mv2 = 0;
+        }
+        if (mv2 <= 0 || !this_.pos.legalMove(mv2)) {
+            var mvs2 = this_.pos.generateMoves(null);
+            mv2 = 0;
+            for (var i = 0; i < mvs2.length; i++) {
+                if (this_.pos.makeMove(mvs2[i])) {
+                    this_.pos.undoMakeMove();
+                    mv2 = mvs2[i];
+                    break;
+                }
+            }
+        }
+        this_.thinking.style.visibility = "hidden";
+        this_.busy = false;
+        this_.busySince = 0;
+        if (mv2 > 0) {
+            alertDelay("引擎超时，已用内置引擎代走一步。");
+            this_.addMove(mv2, true);
+        } else {
+            alertDelay("引擎超时未返回走法，请点“重新开始”。");
+        }
+    }, timeout);
+}
+
+Board.prototype.clearBusyWatchdog = function () {
+    if (this.busyWatchdog) {
+        clearTimeout(this.busyWatchdog);
+        this.busyWatchdog = 0;
+    }
+}
+
 Board.prototype.response = function () {
     if (this.search == null || !this.computerMove()) {
         this.busy = false;
+        this.busySince = 0;
         return;
     }
     // 开局库: 开局阶段直接按谱出子, 既快又稳 (不调用引擎, 不降棋力)
@@ -372,8 +443,10 @@ Board.prototype.response = function () {
     }
     this.thinking.style.visibility = "visible";
     this.busy = true;
+    this.busySince = new Date().getTime();
     this.thinkingSeq = (this.thinkingSeq + 1) & 0xffff;
     var seq = this.thinkingSeq;
+    this.armBusyWatchdog(seq);
     var this_ = this;
 
     if (this.engineId == "xqw") {
@@ -400,8 +473,10 @@ Board.prototype.response = function () {
                     }
                 }
             }
+            this_.clearBusyWatchdog();
             this_.thinking.style.visibility = "hidden";
             this_.busy = false;
+            this_.busySince = 0;
             if (mv > 0) {
                 this_.addMove(mv, true);
             }
@@ -410,8 +485,10 @@ Board.prototype.response = function () {
     }
 
     if (typeof EngineBridge == "undefined" || typeof iccs2Move != "function") {
+        this.clearBusyWatchdog();
         this.thinking.style.visibility = "hidden";
         this.busy = false;
+        this.busySince = 0;
         alert("外部引擎组件缺失，请改回内置引擎。");
         return;
     }
@@ -422,8 +499,10 @@ Board.prototype.response = function () {
         if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
             return;
         }
+        this_.clearBusyWatchdog();
         this_.thinking.style.visibility = "hidden";
         this_.busy = false;
+        this_.busySince = 0;
         var mv = iccs2Move(String(iccs || ""));
         if (mv <= 0 || !this_.pos.legalMove(mv)) {
             var mvs = this_.pos.generateMoves();
@@ -458,15 +537,19 @@ Board.prototype.response = function () {
                     }
                 }
             }
+            this_.clearBusyWatchdog();
             this_.thinking.style.visibility = "hidden";
             this_.busy = false;
+            this_.busySince = 0;
             if (mv2 > 0) {
                 this_.addMove(mv2, true);
                 return;
             }
         }
+        this_.clearBusyWatchdog();
         this_.thinking.style.visibility = "hidden";
         this_.busy = false;
+        this_.busySince = 0;
         alert("引擎出错：" + ((err && err.message) || err));
     });
 }
@@ -474,6 +557,7 @@ Board.prototype.response = function () {
 Board.prototype.cancelThinking = function () {
     this.thinkingSeq = (this.thinkingSeq + 1) & 0xffff;
     this.hintSeq = (this.hintSeq + 1) & 0xffff;
+    this.clearBusyWatchdog();
     if (this.thinkingTimer) {
         clearTimeout(this.thinkingTimer);
         this.thinkingTimer = 0;
