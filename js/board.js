@@ -180,6 +180,16 @@ function Board(container, images, sounds) {
     container.appendChild(this.dummy);
 
     this.flushBoard();
+
+    // 心跳保底：商业级最后一道防线，不依赖任何引擎回调。
+    // 每 2 秒检查一次，真卡死（isStuck）或思考图标挂超 40 秒，强制自愈。
+    // 正常行棋（玩家回合、引擎思考中、动画播放中）永远不会触发。
+    var selfHB = this;
+    setInterval(function () {
+        try {
+            selfHB.checkHeartbeat();
+        } catch (e) { /* 心跳自己绝不能抛错 */ }
+    }, 2000);
 }
 
 Board.prototype.playSound = function (soundFile) {
@@ -265,6 +275,88 @@ Board.prototype.isStuck = function () {
         return true;
     }
     return false;
+}
+
+// 心跳保底：每 2 秒跑一次，任何原因的卡死都不超过 2 秒就被发现。
+// 策略（宁可错杀绝不放过，但错杀成本必须为零）：
+//  1. 对局已结束：清 busy/动画/思考图标，保证能点重新开始。
+//  2. 思考图标挂超 40 秒（引擎/Worker 已死）：按新对局处理——停旧引擎、
+//     用内置引擎在当前局面走一步（验证合法才落子），对局继续不断线。
+//  3. isStuck() 为真：清动画清选中清 busy，轮到电脑就补一次 response()。
+Board.prototype.checkHeartbeat = function () {
+    if (this.result != RESULT_UNKNOWN) {
+        if (this.busy || this.animTimer || this.thinkingTimer || this.busyWatchdog) {
+            this.busy = false;
+            this.busySince = 0;
+            this.clearBusyWatchdog();
+            if (this.thinkingTimer) {
+                try { clearTimeout(this.thinkingTimer); } catch (e1) { /* ignore */ }
+                this.thinkingTimer = 0;
+            }
+            try { this.cancelAnimation(); } catch (e2) { /* ignore */ }
+            this.thinking.style.visibility = "hidden";
+        }
+        return;
+    }
+    if (this.busy && this.thinking.style.visibility != "hidden" &&
+        !this.thinkingTimer && this.busySince > 0 &&
+        (new Date().getTime() - this.busySince) > 40000) {
+        var hbSeq = (this.thinkingSeq + 1) & 0xffff;
+        this.thinkingSeq = hbSeq;
+        this.clearBusyWatchdog();
+        this.pendingWasmFen = null;
+        if (typeof EngineBridge != "undefined" && this.engineId != "xqw" && this.engineId) {
+            try { EngineBridge.reset(this.engineId); } catch (e3) { /* ignore */ }
+        }
+        var hbMv = 0;
+        try {
+            if (this.search != null) {
+                this.search.useBook = this.useBook;
+                hbMv = this.search.searchMain(LIMIT_DEPTH, 300);
+            }
+        } catch (e4) { hbMv = 0; }
+        if (hbMv <= 0 || !this.pos.legalMove(hbMv)) {
+            try { hbMv = this.firstLegalMove(); } catch (e5) { hbMv = 0; }
+        }
+        this.thinking.style.visibility = "hidden";
+        this.busy = false;
+        this.busySince = 0;
+        try { this.cancelAnimation(); } catch (e6) { /* ignore */ }
+        if (hbMv > 0 && this.result == RESULT_UNKNOWN) {
+            try {
+                if (this.computerMove()) {
+                    this.addMove(hbMv, true);
+                } else {
+                    this.addMove(hbMv, false);
+                }
+            } catch (e7) { /* 落子失败就保持可点，不再抛 */ }
+        }
+        try {
+            alertDelay("检测到引擎无响应，已自动恢复，对局继续。");
+        } catch (e8) { /* ignore */ }
+        return;
+    }
+    if (this.isStuck()) {
+        this.forceRecover();
+    }
+}
+
+// 强制恢复：动画/选中/busy/看门狗全部清零，轮到电脑就补一次思考。
+// 被点击自愈、心跳、看门狗三处共用，保证“点哪都有用”。
+Board.prototype.forceRecover = function () {
+    try { this.cancelAnimation(); } catch (e1) { /* ignore */ }
+    this.animStart = 0;
+    this.busy = false;
+    this.busySince = 0;
+    this.clearBusyWatchdog();
+    this.thinking.style.visibility = "hidden";
+    if (this.sqSelected) {
+        try { this.drawSquare(this.sqSelected, false); } catch (e2) { /* ignore */ }
+        this.sqSelected = 0;
+    }
+    if (this.result == RESULT_UNKNOWN && this.computerMove()) {
+        try { this.response(); } catch (e3) { /* ignore */ }
+    }
 }
 
 // 疯狂回归测试：在当前局面下连续做 N 轮"悔棋→走子→换视角→重开"组合操作，
@@ -858,53 +950,11 @@ Board.prototype.cancelAnimation = function () {
 }
 
 Board.prototype.clickSquare = function (sq_) {
-    // 自愈保护：如果思考动画已隐藏、走子动画也已结束，却仍残留 busy，
-    // 说明上一轮回调在切引擎/快速点击竞态中漏清状态。不要让整个棋盘永久失去响应。
-    // 注意：单靠 busy 自愈不够——如果卡在"走子动画定时器"里（浏览器节流/异常导致
-    // setInterval 停跑），busy 会被反复置 true。点不动时强制结束动画再清 busy。
-    // ★ 认命条件必须严格：动画定时器还在跑说明动画正在播，这时 busy=true 是正常的，
-    // 绝不能清状态，否则会把正在走的棋打断、局面与显示错位。
-    var thinkingHidden = (this.thinking.style.visibility == "hidden");
-    var animIdle = !this.animTimer;
-    var animStuck = false;
-    if (!animIdle && this.animStart > 0) {
-        animStuck = (new Date().getTime() - this.animStart) > 1500;
-    }
-    if (this.busy && thinkingHidden && !this.thinkingTimer && (animIdle || animStuck)) {
-        if (this.animTimer) {
-            try {
-                clearInterval(this.animTimer);
-            } catch (e) { /* ignore */ }
-            this.animTimer = 0;
-            try {
-                var aImg = this.animImg;
-                var aSq = this.animSq;
-                if (aImg && aSq) {
-                    var mvA = this.mvLast;
-                    if (mvA > 0) {
-                        this.drawSquare(SRC(mvA), false);
-                        this.drawSquare(DST(mvA), false);
-                    } else {
-                        aImg.style.left = SQ_X(aSq) + "px";
-                        aImg.style.top = SQ_Y(aSq) + "px";
-                    }
-                    aImg.style.zIndex = 0;
-                }
-            } catch (e2) { /* ignore */ }
-            this.animImg = null;
-            this.animSq = 0;
-        }
-        this.busy = false;
-        this.busySince = 0;
-        this.clearBusyWatchdog();
-        if (this.sqSelected) {
-            try {
-                this.drawSquare(this.sqSelected, false);
-            } catch (e3) { /* ignore */ }
-            this.sqSelected = 0;
-        }
+    // 点哪都有用：先试自愈。isStuck() 为 false（引擎思考中/动画播放中）时是空操作，
+    // 绝不打断正常行棋；真卡死时清动画清选中清 busy，轮到电脑就补一次思考。
+    if (this.isStuck()) {
+        this.forceRecover();
         if (this.result == RESULT_UNKNOWN && this.computerMove()) {
-            this.response();
             return;
         }
     }
@@ -951,8 +1001,18 @@ Board.prototype.flushBoard = function () {
 }
 
 Board.prototype.restart = function (fen) {
+    // 商业级重开：不管之前卡在什么状态（引擎思考中/动画一半/残留busy），
+    // 重开键永远有效。先冻结一切回调，再摆新局面。
     this.cancelThinking();
     this.cancelAnimation();
+    this.animStart = 0;
+    this.pendingWasmFen = null;
+    try {
+        if (typeof EngineBridge != "undefined" && this.engineId != "xqw" && this.engineId) {
+            EngineBridge.reset(this.engineId);
+        }
+    } catch (e0) { /* ignore */ }
+    this.thinking.style.visibility = "hidden";
     if (this.sqSelected) {
         this.drawSquare(this.sqSelected, false);
         this.sqSelected = 0;
@@ -967,8 +1027,13 @@ Board.prototype.restart = function (fen) {
 }
 
 Board.prototype.retract = function () {
+    // 商业级悔棋：任何状态下可点。先冻结一切回调再退棋，
+    // 退完如果轮到电脑就地补思考，不会出现"悔完没人走"的真空。
     this.cancelThinking();
     this.cancelAnimation();
+    this.animStart = 0;
+    this.pendingWasmFen = null;
+    this.thinking.style.visibility = "hidden";
     if (this.sqSelected) {
         this.drawSquare(this.sqSelected, false);
         this.sqSelected = 0;
@@ -994,6 +1059,10 @@ Board.prototype.setSound = function (sound) {
 }
 
 Board.prototype.setViewport = function (viewport) {
+    // 换视角只重绘不碰局面；卡死时也允许点，点完顺带自愈一次。
+    if (this.isStuck()) {
+        this.forceRecover();
+    }
     if (this.sqSelected) {
         this.drawSquare(this.sqSelected, false);
         this.sqSelected = 0;

@@ -135,13 +135,28 @@ function restart_click() {
 }
 
 function retract_click() {
-  board.reviewMode = false;
-  for (var i = board.pos.mvList.length; i < selMoveList.options.length; i ++) {
-    board.pos.makeMove(parseInt(selMoveList.options[i].value));
+  // 商业级：悔棋键永远有效。先把显示列表与真实局面先对齐（重放缺的步），
+  // 再退棋。任何异常都不让棋盘停在 busy 里。
+  try {
+    board.reviewMode = false;
+    for (var i = board.pos.mvList.length; i < selMoveList.options.length; i ++) {
+      var backMv = parseInt(selMoveList.options[i].value);
+      if (!(backMv > 0)) {
+        break;
+      }
+      if (!board.pos.legalMove(backMv) || !board.pos.makeMove(backMv)) {
+        break;
+      }
+    }
+    board.retract();
+  } catch (e) {
+    try { board.forceRecover(); } catch (e2) { /* ignore */ }
+    try { board.flushBoard(); } catch (e3) { /* ignore */ }
   }
-  board.retract();
-  selMoveList.options.length = board.pos.mvList.length;
-  selMoveList.selectedIndex = selMoveList.options.length - 1;
+  try {
+    selMoveList.options.length = board.pos.mvList.length;
+    selMoveList.selectedIndex = selMoveList.options.length - 1;
+  } catch (e4) { /* ignore */ }
 }
 
 // 支招：让引擎快速算一手，并高亮提示
@@ -238,10 +253,10 @@ function engine_change() {
     id = "xqw";
   }
   var prevId = board.engineId;
-  // 中途换引擎不重开棋局: 取消旧引擎的思考, 保持当前局面继续
+  // 中途换引擎不重开棋局: 先冻结旧思考并销毁旧 Worker（旧 bestmove 再也回不来），
+  // 再切引擎。切换瞬间棋盘永远可点，不会出现"换引擎换死"。
   board.setEngine(id);
-  board.busy = false;
-  board.thinking.style.visibility = "hidden";
+  board.forceRecover();
   try {
     localStorage.setItem("xiangqi_engine", id);
   } catch (e) { /* ignore */ }
@@ -323,6 +338,12 @@ function restoreEngine() {
 }
 
 function moveList_change() {
+  // 记录列表回看：任何状态下可点。先冻结思考/动画（旧 bestmove 作废），
+  // 再 undo/重放到目标步。单步失败就停在当前位置，保证显示与局面永远一致。
+  try {
+    board.cancelThinking();
+    board.cancelAnimation();
+  } catch (e0) { /* ignore */ }
   if (board.result == RESULT_UNKNOWN && !board.reviewMode) {
     selMoveList.selectedIndex = selMoveList.options.length - 1;
     return;
@@ -339,7 +360,10 @@ function moveList_change() {
     }
   } else {
     for (var i = from; i <= to; i ++) {
-      board.pos.makeMove(parseInt(selMoveList.options[i].value));
+      var fwdMv = parseInt(selMoveList.options[i].value);
+      if (!(fwdMv > 0) || !board.pos.legalMove(fwdMv) || !board.pos.makeMove(fwdMv)) {
+        break;
+      }
     }
   }
   board.flushBoard();
