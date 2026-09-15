@@ -56,8 +56,52 @@ function MOVE_PX(src, dst, step) {
 
 function alertDelay(message) {
     setTimeout(function () {
-        document.getElementById("message_area_84423").innerHTML = message;
+        var el = document.getElementById("message_area_84423");
+        if (el) {
+            el.innerHTML = message;
+        }
     }, 250);
+}
+
+// 全局故障自愈钩子：任何未捕获的异常（包括引擎 Worker/音频/动画回调里的）
+// 都不再让棋盘停在 busy 里等死，而是清状态 + 提示一行字。
+// 卡死后 F12 打不开时的保底：出错原因直接写在页面消息区里，不用开控制台也能看到。
+if (typeof window !== "undefined") {
+    window.__boardErrorHook = null;
+    var __boardHookInstalled = false;
+    (function installBoardHook() {
+        if (__boardHookInstalled) {
+            return;
+        }
+        __boardHookInstalled = true;
+        var report = function (msg) {
+            try {
+                var el = document.getElementById("message_area_84423");
+                if (el && msg) {
+                    el.innerHTML = "出错已自动恢复：" + String(msg).substring(0, 120);
+                }
+            } catch (e) { /* ignore */ }
+            try {
+                if (window.__boardErrorHook) {
+                    window.__boardErrorHook(msg);
+                }
+            } catch (e) { /* ignore */ }
+        };
+        window.addEventListener("error", function (ev) {
+            var msg = (ev && (ev.message || (ev.error && ev.error.message))) || "未知错误";
+            report(msg);
+        });
+        window.addEventListener("unhandledrejection", function (ev) {
+            var r = ev && ev.reason;
+            var msg = (r && (r.message || r)) || "异步错误";
+            report(msg);
+            try {
+                if (ev && typeof ev.preventDefault === "function") {
+                    ev.preventDefault();
+                }
+            } catch (e) { /* ignore */ }
+        });
+    })();
 }
 
 function Board(container, images, sounds) {
@@ -657,10 +701,41 @@ Board.prototype.cancelAnimation = function () {
 Board.prototype.clickSquare = function (sq_) {
     // 自愈保护：如果思考动画已隐藏、走子动画也已结束，却仍残留 busy，
     // 说明上一轮回调在切引擎/快速点击竞态中漏清状态。不要让整个棋盘永久失去响应。
-    if (this.busy && this.thinking.style.visibility == "hidden" && !this.animTimer) {
+    // 注意：单靠 busy 自愈不够——如果卡在"走子动画定时器"里（浏览器节流/异常导致
+    // setInterval 停跑），busy 会被反复置 true。点不动时强制结束动画再清 busy。
+    if (this.busy && this.thinking.style.visibility == "hidden" && !this.thinkingTimer) {
+        if (this.animTimer) {
+            try {
+                clearInterval(this.animTimer);
+            } catch (e) { /* ignore */ }
+            this.animTimer = 0;
+            try {
+                var aImg = this.animImg;
+                var aSq = this.animSq;
+                if (aImg && aSq) {
+                    var mvA = this.mvLast;
+                    if (mvA > 0) {
+                        this.drawSquare(SRC(mvA), false);
+                        this.drawSquare(DST(mvA), false);
+                    } else {
+                        aImg.style.left = SQ_X(aSq) + "px";
+                        aImg.style.top = SQ_Y(aSq) + "px";
+                    }
+                    aImg.style.zIndex = 0;
+                }
+            } catch (e2) { /* ignore */ }
+            this.animImg = null;
+            this.animSq = 0;
+        }
         this.busy = false;
         this.busySince = 0;
         this.clearBusyWatchdog();
+        if (this.sqSelected) {
+            try {
+                this.drawSquare(this.sqSelected, false);
+            } catch (e3) { /* ignore */ }
+            this.sqSelected = 0;
+        }
         if (this.result == RESULT_UNKNOWN && this.computerMove()) {
             this.response();
             return;
