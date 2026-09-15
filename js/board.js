@@ -132,6 +132,8 @@ function Board(container, images, sounds) {
     this.animTimer = 0;
     this.animImg = null;
     this.animSq = 0;
+    this.animStart = 0;
+    this.pendingWasmFen = null;
     this.hintMv = 0;
     this.hintSeq = 0;
     this.engineId = "xqw";
@@ -246,6 +248,119 @@ Board.prototype.computerLastMove = function () {
     return 1 - this.pos.sdPlayer == this.computer;
 }
 
+// 查询当前棋盘是否"真卡死"：思考动画已藏、思考定时器没跑、
+// 动画定时器没跑（或跑了超过 1.5 秒还没播完），却还占着 busy。
+// 疯狂测试脚本和页面自检共用这个判断，避免各写一套标准打架。
+Board.prototype.isStuck = function () {
+    if (!this.busy || this.result != RESULT_UNKNOWN) {
+        return false;
+    }
+    if (this.thinking.style.visibility != "hidden" || this.thinkingTimer) {
+        return false;
+    }
+    if (!this.animTimer) {
+        return true;
+    }
+    if (this.animStart > 0 && (new Date().getTime() - this.animStart) > 1500) {
+        return true;
+    }
+    return false;
+}
+
+// 疯狂回归测试：在当前局面下连续做 N 轮"悔棋→走子→换视角→重开"组合操作，
+// 每一步都检查 isStuck()。正常走子（玩家/电脑回合推进、busy 短暂为 true）不算卡死，
+// 只有忙了超过 GRACE 还不释放才记一次。全部通过会在 console 打 torment-ok。
+Board.prototype.tormentTest = function (rounds) {
+    var self = this;
+    rounds = rounds > 0 ? rounds : 30;
+    try {
+        console.log("[torment] start, rounds=" + rounds);
+    } catch (e) { /* ignore */ }
+    var GRACE = 3000;
+    var stuckCount = 0;
+    var i = 0;
+    var savedFen = null;
+    try {
+        savedFen = this.pos.toFen();
+    } catch (e2) {
+        savedFen = null;
+    }
+    function snapshot() {
+        var s = { busy: self.busy, thinkingSeq: self.thinkingSeq, result: self.result,
+            sd: -1, mvLen: -1, stuck: false };
+        try {
+            s.sd = self.pos.sdPlayer;
+            s.mvLen = self.pos.mvList.length;
+            s.stuck = self.isStuck();
+        } catch (e3) { /* ignore */ }
+        return s;
+    }
+    var t0 = new Date().getTime();
+    function oneRound() {
+        if (i >= rounds) {
+            var dt = new Date().getTime() - t0;
+            try {
+                console.log("[torment] done in " + dt + "ms, stuck=" + stuckCount + "/" + rounds);
+            } catch (e4) { /* ignore */ }
+            if (stuckCount == 0) {
+                try {
+                    console.log("%c[torment] torment-ok：连续 " + rounds + " 轮无卡死", "color:green;font-weight:bold");
+                } catch (e5) { /* ignore */ }
+            } else {
+                try {
+                    console.warn("[torment] FAIL：卡死 " + stuckCount + " 次");
+                } catch (e6) { /* ignore */ }
+            }
+            return "torment-" + (stuckCount == 0 ? "ok" : "fail(" + stuckCount + ")");
+        }
+        i++;
+        var mode = i % 4;
+        try {
+            if (mode == 1) {
+                // 悔棋后再用兜底走一步
+                self.retract();
+            } else if (mode == 2) {
+                // 玩家回合就走一步兜底着法
+                if (!self.computerMove() && self.result == RESULT_UNKNOWN) {
+                    var mv = self.firstLegalMove();
+                    if (mv > 0) {
+                        self.addMove(mv, false);
+                    }
+                }
+            } else if (mode == 3) {
+                // 换视角（只重绘，不动局面）
+                self.setViewport(!self.viewport);
+            } else {
+                // 取消思考 + 重绘，模拟重开前的打断
+                self.cancelThinking();
+                self.flushBoard();
+            }
+        } catch (err) {
+            try {
+                console.warn("[torment] round " + i + " exception: " + ((err && err.message) || err));
+            } catch (e7) { /* ignore */ }
+            stuckCount++;
+        }
+        // 给动画/回调一个心跳，再检查是否真卡死
+        setTimeout(function () {
+            var s = snapshot();
+            if (s.stuck) {
+                stuckCount++;
+                try {
+                    console.warn("[torment] round " + i + " STUCK: " + JSON.stringify(s));
+                } catch (e8) { /* ignore */ }
+                // 自愈一次，继续下一轮，不让一次卡死污染后面所有轮次
+                try {
+                    self.clickSquare(0);
+                } catch (e9) { /* ignore */ }
+            }
+            oneRound();
+        }, 700);
+    }
+    oneRound();
+    return "torment-running";
+}
+
 // 有效思考时长: 疯狂模式下按局势(中局/残局)自动加时, 追求更狠的着法
 Board.prototype.thinkMillis = function () {
     var ms = this.millis;
@@ -274,7 +389,9 @@ Board.prototype.addMove = function (mv, computerMove) {
     if (!this.pos.legalMove(mv)) {
         if (computerMove) {
             var fb0 = this.firstLegalMove();
-            if (fb0 > 0) {
+            // firstLegalMove 内部是 make+undo 实测，这里必须真正落子一次，
+            // 否则局面没推进、显示却动了，直接错位卡死。
+            if (fb0 > 0 && this.pos.makeMove(fb0)) {
                 this.doMakeMove(fb0, true);
                 return;
             }
@@ -297,13 +414,14 @@ Board.prototype.addMove = function (mv, computerMove) {
         this.playSound("illegal");
         if (computerMove) {
             var fb = this.firstLegalMove();
-            if (fb > 0) {
+            if (fb > 0 && this.pos.makeMove(fb)) {
                 this.doMakeMove(fb, true);
                 return;
             }
         }
         this.busy = false;
         this.busySince = 0;
+        this.animStart = 0;
         this.clearBusyWatchdog();
         this.thinking.style.visibility = "hidden";
         if (computerMove) {
@@ -342,6 +460,17 @@ Board.prototype.firstLegalMove = function () {
 }
 
 Board.prototype.startMoveAnimation = function (mv, computerMove) {
+    // 同一时间只允许一个走子动画：上一个没播完就被新走子顶掉时，
+    // 老定时器必须先停，否则两个动画回调互相覆盖棋子位置，终点错乱。
+    if (this.animTimer) {
+        try {
+            clearInterval(this.animTimer);
+        } catch (e0) { /* ignore */ }
+        this.animTimer = 0;
+        this.animImg = null;
+        this.animSq = 0;
+        this.animStart = 0;
+    }
     var sqSrc = this.flipped(SRC(mv));
     var xSrc = SQ_X(sqSrc);
     var ySrc = SQ_Y(sqSrc);
@@ -355,10 +484,17 @@ Board.prototype.startMoveAnimation = function (mv, computerMove) {
     var this_ = this;
     this.animImg = img;
     this.animSq = sqSrc;
+    var myAnimStart = new Date().getTime();
+    this.animStart = myAnimStart;
     this.animTimer = setInterval(function () {
+        // 不是本轮动画的回调（已被新走子取代）：直接退出，不碰棋盘
+        if (this_.animTimer == 0 || this_.animStart !== myAnimStart) {
+            return;
+        }
         if (step == 0) {
             clearInterval(this_.animTimer);
             this_.animTimer = 0;
+            this_.animStart = 0;
             style.left = xSrc + "px";
             style.top = ySrc + "px";
             style.zIndex = 0;
@@ -369,6 +505,26 @@ Board.prototype.startMoveAnimation = function (mv, computerMove) {
             step--;
         }
     }, 16);
+    // 动画保底：浏览器节流/异常导致 setInterval 停跑时，
+    // 1 秒后强制收尾，保证 postAddMove 一定执行、busy 一定释放。
+    var thisMv = mv;
+    var thisComp = computerMove;
+    var thisStyle = style;
+    var thisXSrc = xSrc;
+    var thisYSrc = ySrc;
+    setTimeout(function () {
+        if (this_.animTimer != 0 && this_.animStart === myAnimStart) {
+            try {
+                clearInterval(this_.animTimer);
+            } catch (e1) { /* ignore */ }
+            this_.animTimer = 0;
+            this_.animStart = 0;
+            thisStyle.left = thisXSrc + "px";
+            thisStyle.top = thisYSrc + "px";
+            thisStyle.zIndex = 0;
+            this_.postAddMove(thisMv, thisComp);
+        }
+    }, 1000);
 }
 
 Board.prototype.postAddMove = function (mv, computerMove) {
@@ -689,12 +845,15 @@ Board.prototype.cancelAnimation = function () {
     if (this.animTimer) {
         clearInterval(this.animTimer);
         this.animTimer = 0;
+        this.animStart = 0;
         var img = this.animImg;
         if (img) {
             img.style.left = SQ_X(this.animSq) + "px";
             img.style.top = SQ_Y(this.animSq) + "px";
             img.style.zIndex = 0;
         }
+        this.animImg = null;
+        this.animSq = 0;
     }
 }
 
@@ -703,7 +862,15 @@ Board.prototype.clickSquare = function (sq_) {
     // 说明上一轮回调在切引擎/快速点击竞态中漏清状态。不要让整个棋盘永久失去响应。
     // 注意：单靠 busy 自愈不够——如果卡在"走子动画定时器"里（浏览器节流/异常导致
     // setInterval 停跑），busy 会被反复置 true。点不动时强制结束动画再清 busy。
-    if (this.busy && this.thinking.style.visibility == "hidden" && !this.thinkingTimer) {
+    // ★ 认命条件必须严格：动画定时器还在跑说明动画正在播，这时 busy=true 是正常的，
+    // 绝不能清状态，否则会把正在走的棋打断、局面与显示错位。
+    var thinkingHidden = (this.thinking.style.visibility == "hidden");
+    var animIdle = !this.animTimer;
+    var animStuck = false;
+    if (!animIdle && this.animStart > 0) {
+        animStuck = (new Date().getTime() - this.animStart) > 1500;
+    }
+    if (this.busy && thinkingHidden && !this.thinkingTimer && (animIdle || animStuck)) {
         if (this.animTimer) {
             try {
                 clearInterval(this.animTimer);
