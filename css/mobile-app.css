@@ -7,6 +7,10 @@
 .side-panel {
     font-size: 12px;
     color: #4a4030;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    box-sizing: border-box;
 }
 
 .panel-sec {
@@ -123,6 +127,17 @@
     font-size: 12px;
     color: #333;
     padding: 2px;
+    flex: 1;
+    min-height: 0;
+    height: auto;
+}
+
+.sec-record {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    margin-bottom: 0;
 }
 
 .record-btns {
@@ -233,8 +248,8 @@
     .sec-engine { grid-column: 1 / -1; }
     .sec-engine .fld { margin-bottom: 5px; }
 
-    .sec-record { grid-column: 1 / -1; }
-    #selMoveList { height: 110px; }
+    .sec-record { grid-column: 1 / -1; display: block; }
+    #selMoveList { height: 110px; flex: none; }
 
     #message_area_84423 {
         min-height: 20px;
