@@ -288,6 +288,10 @@ function setEngStatus() {
 }
 
 // 恢复上次选择的引擎，并在后台预热 WASM 引擎
+// file:// 下 localStorage 可能存着上次的 pikafish/eleeye：只恢复下拉框显示，
+// 实际引擎启动一律从 xqw 开始（秒开、零依赖），用户手动切 WASM 时再加载。
+// 否则 file:// 双击开局就去解 6MB bundle，主线程被 fetch+解析冻住，
+// 第二步都走不出去——就是“出师未捷身先死”。
 function restoreEngine() {
   var saved = "xqw";
   try {
@@ -301,14 +305,22 @@ function restoreEngine() {
         break;
       }
     }
-  }
-  if (saved != "xqw" && typeof EngineBridge != "undefined" && EngineBridge.supported(saved)) {
-    EngineBridge.load(saved).then(function () {
-      if (board.engineId == "xqw") {
-        board.setEngine(saved);
-        setEngStatus();
+    // file:// 下强制回到 xqw，避免开局预热 WASM 冻住页面
+    var isFile = false;
+    try {
+      isFile = typeof location != "undefined" && location.protocol === "file:";
+    } catch (e2) { /* ignore */ }
+    if (isFile && saved != "xqw") {
+      for (var j = 0; j < sel.options.length; j++) {
+        if (sel.options[j].value == "xqw") {
+          sel.selectedIndex = j;
+          break;
+        }
       }
-    }, function () { /* 预热失败不打扰用户 */ });
+      try {
+        localStorage.setItem("xiangqi_engine", "xqw");
+      } catch (e3) { /* ignore */ }
+    }
   }
 }
 

@@ -124,6 +124,33 @@ function buildBlobWorkerSource(id, bundle) {
   ].join("\n");
 }
 
+// xqw 自包含 Blob Worker：file:// 下 new Worker(相对路径)+importScripts 全被禁，
+// 只能把 worker 源码与 book/position/search/cchess 内联拼成一个 Blob。
+// 文件不大（book.js 300KB 级），fetch 同源 file 理论可读；读不到就 reject，
+// 上层 catch 会走主线程同步 searchMain 最后一搏，对局不断。
+function buildXqwBlob() {
+  function fetchText(url) {
+    return fetch(url, { cache: "force-cache" }).then(function (r) {
+      if (!r.ok) {
+        throw new Error("HTTP " + r.status);
+      }
+      return r.text();
+    });
+  }
+  return Promise.all([
+    fetchText("js/engines/xqw/xqw.worker.js?v=1"),
+    fetchText("js/book.js"),
+    fetchText("js/position.js"),
+    fetchText("js/search.js"),
+    fetchText("js/cchess.js")
+  ]).then(function (parts) {
+    var workerSrc = parts[0];
+    // 去掉 worker 头部的 importScripts，换成内联源码
+    workerSrc = workerSrc.replace(/importScripts\([^)]*\);?/g, "");
+    return parts[1] + "\n" + parts[2] + "\n" + parts[3] + "\n" + parts[4] + "\n" + workerSrc;
+  });
+}
+
 // 懒加载 bundle 脚本(仅在 Blob 降级时用到)
 function loadBundle(id) {
   var info = engineInfo(id);
@@ -183,6 +210,8 @@ var EngineBridge = (function () {
 
   // 挂起的搜索必须有始有终：ERROR / 线程崩溃 / 超时都要 reject 它，
   // 否则棋盘 busy 永久为 true，点哪都没用。
+  // 注意：search() 里 resolve 已被包装为“结算一次就停计时器”，
+  // 这里只处理 reject 通道；resolve 通道由 deliver() 直接调用包装器。
   function failSearch(id, seq, err) {
     var cb = searches[seq];
     if (!cb) {
@@ -192,7 +221,9 @@ var EngineBridge = (function () {
     var rej = searches[seq + ":reject"];
     delete searches[seq + ":reject"];
     if (rej) {
-      rej(err);
+      try {
+        rej(err);
+      } catch (eR) { /* 上层已结算则忽略 */ }
     }
   }
 
@@ -278,20 +309,35 @@ var EngineBridge = (function () {
       }
       // xqw 内置引擎同样走 Worker：原生 Worker 直接加载 xqw.worker.js，
       // 它用 importScripts 拉 book/position/search/cchess，无任何外部依赖。
+      // file:// 下浏览器直接禁止 new Worker(相对路径)，同步抛错，走下面的 Blob 降级：
+      // 把 xqw.worker.js + book/position/search/cchess 打包成自包含 Blob Worker。
       if (id === "xqw") {
-        var xw = null;
-        try {
-          xw = new Worker(info.worker);
-        } catch (e) {
-          xw = null;
+        if (!isFileProtocol()) {
+          var xw = null;
+          try {
+            xw = new Worker(info.worker);
+          } catch (e) {
+            xw = null;
+          }
+          if (xw) {
+            st.mode = "native";
+            attachWorker(id, xw);
+            resolve();
+            return;
+          }
         }
-        if (xw) {
-          st.mode = "native";
-          attachWorker(id, xw);
+        buildXqwBlob().then(function (src) {
+          var xw2 = null;
+          try {
+            xw2 = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+          } catch (e2) {
+            reject(new Error("当前环境无法创建引擎线程"));
+            return;
+          }
+          st.mode = "blob";
+          attachWorker(id, xw2);
           resolve();
-          return;
-        }
-        reject(new Error("当前环境无法创建引擎线程"));
+        }, reject);
         return;
       }
       if (!info.wasm) {
@@ -346,12 +392,21 @@ var EngineBridge = (function () {
     st.promise = new Promise(function (resolve, reject) {
       st._resolve = resolve;
       st._reject = reject;
-      spawnWorker(id).catch(function (e) {
+      try {
+        spawnWorker(id).catch(function (e) {
+          if (st._reject) {
+            st._reject(e);
+            st._reject = null;
+          }
+        });
+      } catch (eSync) {
+        // spawnWorker 里同步抛错（比如 file:// 下 new Worker 直接炸）：
+        // 必须进 reject，否则 load() 的 promise 永远 pending，棋盘 busy 锁死。
         if (st._reject) {
-          st._reject(e);
+          st._reject(eSync);
           st._reject = null;
         }
-      });
+      }
       st.rejectTimer = setTimeout(function () {
         if (!st.ready) {
           st.error = "引擎加载超时";
@@ -362,6 +417,8 @@ var EngineBridge = (function () {
         }
       }, timeoutMs);
     });
+    // promise 自带 catch 吞掉未处理 rejection 告警，上层 failFast 照常工作
+    st.promise.catch(function () { /* 已由 failFast/上层处理 */ });
     return st.promise;
   }
 
@@ -439,9 +496,32 @@ var EngineBridge = (function () {
       searches[seq] = resolve; // 由 deliver() 在 BEST_MOVE 时最终 resolve
       searches[seq + ":reject"] = reject;
 
+      var settled = false;
+      var timer = 0;
       var failFast = function (err) {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timer) {
+          try { clearTimeout(timer); } catch (eT) { /* ignore */ }
+          timer = 0;
+        }
         failSearch(id, seq, err);
       };
+      // BEST_MOVE 到达即结算：停掉兜底计时器，不再让它 15 秒后误伤
+      var wrapResolve = function (mv, info) {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timer) {
+          try { clearTimeout(timer); } catch (eT2) { /* ignore */ }
+          timer = 0;
+        }
+        resolve(mv, info);
+      };
+      searches[seq] = wrapResolve;
 
       var run = function () {
         // 引擎还没就绪：把搜索排队，主线程的 failFast + 超时兜底会管住它；
@@ -449,18 +529,25 @@ var EngineBridge = (function () {
         // 两边配合，保证这次走子一定有 BEST_MOVE 或 reject，不锁棋盘。
         if (!st.worker || !st.ready) {
           st.seq = seq;
-          load(id).then(function () {
-            if (state(id).ready && state(id).worker && searches[seq]) {
-              st.seq = seq;
-              try {
-                state(id).worker.postMessage(searchPayload(fen, movetime, seq, useBook));
-              } catch (e) {
-                failFast(e);
+          try {
+            load(id).then(function () {
+              if (settled) {
+                return;
               }
-            }
-          }, failFast);
+              if (state(id).ready && state(id).worker && searches[seq]) {
+                st.seq = seq;
+                try {
+                  state(id).worker.postMessage(searchPayload(fen, movetime, seq, useBook));
+                } catch (e) {
+                  failFast(e);
+                }
+              }
+            }, failFast);
+          } catch (eSync) {
+            failFast(eSync);
+          }
           // 兜底超时: 正常应在 movetime 前后返回
-          setTimeout(function () {
+          timer = setTimeout(function () {
             failFast(new Error("引擎思考超时"));
           }, (movetime || 500) + 15000);
           return;
@@ -470,17 +557,22 @@ var EngineBridge = (function () {
           st.worker.postMessage(searchPayload(fen, movetime, seq, useBook));
         } catch (e) {
           failFast(e);
+          return;
         }
         // 兜底超时: 正常应在 movetime 前后返回
-        setTimeout(function () {
+        timer = setTimeout(function () {
           failFast(new Error("引擎思考超时"));
         }, (movetime || 500) + 15000);
       };
 
-      if (st.worker && st.ready) {
-        run();
-      } else {
-        load(id).then(run, failFast);
+      try {
+        if (st.worker && st.ready) {
+          run();
+        } else {
+          load(id).then(run, failFast);
+        }
+      } catch (eOuter) {
+        failFast(eOuter);
       }
     });
   }

@@ -873,8 +873,13 @@ Board.prototype.response = function () {
             return;
         }
         this_.pendingWasmFen = null;
-        // 任何引擎失败：WASM 炸了就用 xqw Worker 代走，xqw 炸了就用主线程同步兜底。
+        // 任何引擎失败：先看是不是本轮引擎自己炸了（xqw 就不用再找 xqw 代走，
+        // 直接进主线程最后一搏，省一次 Worker 往返）。
         // 对局永远不断，不弹窗打断（只在消息区留一行）。
+        if (selfEngine === "xqw") {
+            syncLastResort();
+            return;
+        }
         EngineBridge.search("xqw", this_.pos.toFen(), Math.min(thinkMs, 800), this_.useBook).then(function (iccs2) {
             if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
                 return;
@@ -899,32 +904,37 @@ Board.prototype.response = function () {
             this_.busy = false;
             this_.busySince = 0;
             this_.addMove(mvF, true);
-        }, function () {
-            // xqw Worker 也失败：主线程同步 searchMain 最后一搏（300ms 内必返回）
-            var mvS = 0;
-            try {
-                if (this_.search != null) {
-                    this_.search.useBook = this_.useBook;
-                    mvS = this_.search.searchMain(LIMIT_DEPTH, 300);
-                }
-            } catch (eS) { mvS = 0; }
-            if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
-                return;
-            }
-            if (mvS <= 0 || !this_.pos.legalMove(mvS)) {
-                try { mvS = this_.firstLegalMove(); } catch (e4) { mvS = 0; }
-            }
-            this_.clearBusyWatchdog();
-            this_.thinking.style.visibility = "hidden";
-            this_.busy = false;
-            this_.busySince = 0;
-            if (mvS > 0) {
-                this_.addMove(mvS, true);
-                return;
-            }
-            alertDelay("引擎出错且无合法走法，请点“重新开始”。");
-        });
+        }, syncLastResort);
     });
+
+    // 主线程同步最后一搏：所有 Worker 都失败时（file:// 极端环境），
+    // 用主线程 searchMain 在 300ms 内给出一步。会卡界面一小下，
+    // 但保证对局不断、棋盘可点，比永久锁死好一万倍。
+    function syncLastResort() {
+        // xqw Worker 也失败：主线程同步 searchMain 最后一搏（300ms 内必返回）
+        var mvS = 0;
+        try {
+            if (this_.search != null) {
+                this_.search.useBook = this_.useBook;
+                mvS = this_.search.searchMain(LIMIT_DEPTH, 300);
+            }
+        } catch (eS) { mvS = 0; }
+        if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
+            return;
+        }
+        if (mvS <= 0 || !this_.pos.legalMove(mvS)) {
+            try { mvS = this_.firstLegalMove(); } catch (e4) { mvS = 0; }
+        }
+        this_.clearBusyWatchdog();
+        this_.thinking.style.visibility = "hidden";
+        this_.busy = false;
+        this_.busySince = 0;
+        if (mvS > 0) {
+            this_.addMove(mvS, true);
+            return;
+        }
+        alertDelay("引擎出错且无合法走法，请点“重新开始”。");
+    }
 }
 
 Board.prototype.cancelThinking = function () {

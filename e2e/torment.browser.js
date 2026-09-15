@@ -62,6 +62,33 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(1500);
   console.log("[e2e] page ready");
 
+  // file:// 双击场景复刻：file 协议下 new Worker(相对路径) 被浏览器直接禁止，
+  // 引擎必须走 Blob 降级 + 主线程兜底，对局不能锁死
+  async function fileProtoProbe() {
+    const r = await page.evaluate(async () => {
+      const out = { workerNewOk: "unknown", blobOk: "unknown", xqwSearch: "unknown" };
+      try {
+        const w = new Worker("js/engines/xqw/xqw.worker.js");
+        w.terminate();
+        out.workerNewOk = true;
+      } catch (e) { out.workerNewOk = false; }
+      try {
+        const w2 = new Worker(URL.createObjectURL(new Blob(["self.onmessage=function(e){self.postMessage({type:'READY'});};"], { type: "text/javascript" })));
+        w2.terminate();
+        out.blobOk = true;
+      } catch (e) { out.blobOk = false; }
+      try {
+        const fen = board.pos.toFen();
+        const iccs = await EngineBridge.search("xqw", fen, 300, true);
+        out.xqwSearch = String(iccs || "");
+      } catch (e) { out.xqwSearch = "ERR:" + (e && e.message || e); }
+      return out;
+    });
+    console.log("[e2e] worker-probe:", JSON.stringify(r));
+    return r;
+  }
+  const probe = await fileProtoProbe();
+
   // 测试脚本跑在页面里：每轮 = 玩家走一步(两次真实clickSquare) + 切引擎 + 切视角 + 悔棋 + 记录回看 + 偶数轮重开
   const result = await page.evaluate(async () => {
     const log = [];
@@ -192,9 +219,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   result.log.forEach((l) => console.log("[e2e]", l));
   console.log("[e2e] pageerrors=", errors.length);
   errors.slice(0, 20).forEach((e) => console.log("[e2e-err]", e));
+  // xqw Worker 必须真返回走法（不是空串/ERR），否则“重写根治”就是空话
+  const xqwOk = probe && typeof probe.xqwSearch === "string" &&
+    /^[a-i][0-9]-[a-i][0-9]$/i.test(probe.xqwSearch.trim());
 
   await browser.close();
   srv.close();
+  if (!xqwOk) { console.log("E2E-FAIL: xqw Worker 未返回合法走法: " + JSON.stringify(probe)); process.exit(1); }
   if (result.stuckEvents > 0) { console.log("E2E-FAIL: 真机撞出卡死 " + result.stuckEvents + " 次"); process.exit(1); }
-  console.log("E2E-OK: 真机 25 轮极端连击零卡死");
+  console.log("E2E-OK: 真机 25 轮极端连击零卡死 + xqw Worker 着法 " + probe.xqwSearch);
 })().catch((e) => { console.error("E2E-HARNESS-FAIL:", e.message); process.exit(2); });
