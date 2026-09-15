@@ -228,7 +228,7 @@ Board.prototype.setChaseAllowed = function (allowed) {
 Board.prototype.setEngine = function (id) {
     if (typeof EngineBridge != "undefined") {
         var old = this.engineId;
-        if (old !== id && EngineBridge.supported(old) && old !== "xqw") {
+        if (old && old !== id && EngineBridge.supported(old)) {
             // 先停掉旧引擎正在跑的搜索并销毁它的 Worker：
             // 换引擎后旧引擎再吐 bestmove 也没人收，不会污染新引擎局面。
             EngineBridge.reset(old);
@@ -301,39 +301,55 @@ Board.prototype.checkHeartbeat = function () {
     if (this.busy && this.thinking.style.visibility != "hidden" &&
         !this.thinkingTimer && this.busySince > 0 &&
         (new Date().getTime() - this.busySince) > 40000) {
+        // 思考图标挂超 40 秒：旧引擎已死。用 xqw Worker 异步接管（主线程不阻塞），
+        // 拿到走法才落子，对局继续不断线。
         var hbSeq = (this.thinkingSeq + 1) & 0xffff;
         this.thinkingSeq = hbSeq;
         this.clearBusyWatchdog();
         this.pendingWasmFen = null;
-        if (typeof EngineBridge != "undefined" && this.engineId != "xqw" && this.engineId) {
+        if (typeof EngineBridge != "undefined" && this.engineId) {
             try { EngineBridge.reset(this.engineId); } catch (e3) { /* ignore */ }
         }
-        var hbMv = 0;
-        try {
-            if (this.search != null) {
-                this.search.useBook = this.useBook;
-                hbMv = this.search.searchMain(LIMIT_DEPTH, 300);
-            }
-        } catch (e4) { hbMv = 0; }
-        if (hbMv <= 0 || !this.pos.legalMove(hbMv)) {
-            try { hbMv = this.firstLegalMove(); } catch (e5) { hbMv = 0; }
-        }
-        this.thinking.style.visibility = "hidden";
-        this.busy = false;
-        this.busySince = 0;
-        try { this.cancelAnimation(); } catch (e6) { /* ignore */ }
-        if (hbMv > 0 && this.result == RESULT_UNKNOWN) {
-            try {
-                if (this.computerMove()) {
-                    this.addMove(hbMv, true);
-                } else {
-                    this.addMove(hbMv, false);
+        var hbThis = this;
+        if (typeof EngineBridge != "undefined") {
+            EngineBridge.search("xqw", this.pos.toFen(), 800, this.useBook).then(function (iccs) {
+                if (hbThis.thinkingSeq !== hbSeq || hbThis.result != RESULT_UNKNOWN) {
+                    return;
                 }
-            } catch (e7) { /* 落子失败就保持可点，不再抛 */ }
+                var hbMv = iccs2Move(String(iccs || ""));
+                var hbOk = (hbMv > 0 && hbThis.pos.legalMove(hbMv)) ? hbThis.pos.makeMove(hbMv) : false;
+                if (hbOk) {
+                    hbThis.pos.undoMakeMove();
+                } else {
+                    try { hbMv = hbThis.firstLegalMove(); } catch (e5) { hbMv = 0; }
+                }
+                hbThis.thinking.style.visibility = "hidden";
+                hbThis.busy = false;
+                hbThis.busySince = 0;
+                try { hbThis.cancelAnimation(); } catch (e6) { /* ignore */ }
+                if (hbMv > 0 && hbThis.result == RESULT_UNKNOWN) {
+                    try {
+                        hbThis.addMove(hbMv, hbThis.computerMove());
+                    } catch (e7) { /* 落子失败就保持可点，不再抛 */ }
+                }
+                try {
+                    alertDelay("检测到引擎无响应，已自动恢复，对局继续。");
+                } catch (e8) { /* ignore */ }
+            }, function () {
+                hbThis.thinking.style.visibility = "hidden";
+                hbThis.busy = false;
+                hbThis.busySince = 0;
+                try { hbThis.forceRecover(); } catch (e9) { /* ignore */ }
+                try {
+                    alertDelay("检测到引擎无响应，已自动恢复，对局继续。");
+                } catch (e10) { /* ignore */ }
+            });
+        } else {
+            this.thinking.style.visibility = "hidden";
+            this.busy = false;
+            this.busySince = 0;
+            try { this.forceRecover(); } catch (e11) { /* ignore */ }
         }
-        try {
-            alertDelay("检测到引擎无响应，已自动恢复，对局继续。");
-        } catch (e8) { /* ignore */ }
         return;
     }
     if (this.isStuck()) {
@@ -720,8 +736,8 @@ Board.prototype.postMate = function (computerMove) {
     this.busy = false;
 }
 
-// busy 看门狗：电脑思考超时没有任何回调时，强制用内置引擎走一步，
-// 棋盘永远不会永久锁死。超时阈值 = 本步思考预算 + 15s 引擎兜底 + 5s 余量。
+// busy 看门狗：电脑思考超时没有任何回调时走 xqw Worker 兜底一步，
+// 主线程永不跑同步搜索，界面永远可点。
 Board.prototype.armBusyWatchdog = function (seq) {
     this.clearBusyWatchdog();
     var this_ = this;
@@ -737,35 +753,53 @@ Board.prototype.armBusyWatchdog = function (seq) {
         if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN || !this_.busy) {
             return;
         }
-        // 看门狗触发：先停掉旧引擎可能迟到的 BEST_MOVE，再用内置引擎兜底走子
+        // 看门狗触发：旧思考作废，用 xqw Worker 异步兜底（主线程不阻塞）
         this_.thinkingSeq = (this_.thinkingSeq + 1) & 0xffff;
-        if (typeof EngineBridge != "undefined" && this_.engineId != "xqw") {
+        var wseq = this_.thinkingSeq;
+        this_.pendingWasmFen = null;
+        if (typeof EngineBridge != "undefined" && this_.engineId) {
             try {
                 EngineBridge.stop(this_.engineId);
             } catch (e) { /* ignore */
             }
         }
-        var mv2 = 0;
-        try {
-            if (this_.search != null) {
-                this_.search.useBook = this_.useBook;
-                mv2 = this_.search.searchMain(LIMIT_DEPTH, this_.thinkMillis());
-            }
-        } catch (e2) {
-            mv2 = 0;
-        }
-        if (mv2 <= 0 || !this_.pos.legalMove(mv2)) {
-            mv2 = this_.firstLegalMove();
-        }
-        this_.thinking.style.visibility = "hidden";
-        this_.busy = false;
-        this_.busySince = 0;
-        if (mv2 > 0) {
-            alertDelay("引擎超时，已用内置引擎代走一步。");
-            this_.addMove(mv2, true);
-        } else {
+        if (typeof EngineBridge == "undefined") {
+            this_.thinking.style.visibility = "hidden";
+            this_.busy = false;
+            this_.busySince = 0;
             alertDelay("引擎超时未返回走法，请点“重新开始”。");
+            return;
         }
+        EngineBridge.search("xqw", this_.pos.toFen(), 800, this_.useBook).then(function (iccs) {
+            if (this_.thinkingSeq !== wseq || this_.result != RESULT_UNKNOWN) {
+                return;
+            }
+            var mvW = iccs2Move(String(iccs || ""));
+            var okW = (mvW > 0 && this_.pos.legalMove(mvW)) ? this_.pos.makeMove(mvW) : false;
+            if (okW) {
+                this_.pos.undoMakeMove();
+            } else {
+                try { mvW = this_.firstLegalMove(); } catch (eW) { mvW = 0; }
+            }
+            this_.thinking.style.visibility = "hidden";
+            this_.busy = false;
+            this_.busySince = 0;
+            if (mvW > 0) {
+                alertDelay("引擎超时，已用内置引擎代走一步。");
+                this_.addMove(mvW, true);
+            } else {
+                alertDelay("引擎超时未返回走法，请点“重新开始”。");
+            }
+        }, function () {
+            if (this_.thinkingSeq !== wseq || this_.result != RESULT_UNKNOWN) {
+                return;
+            }
+            this_.thinking.style.visibility = "hidden";
+            this_.busy = false;
+            this_.busySince = 0;
+            try { this_.forceRecover(); } catch (eF) { /* ignore */ }
+            alertDelay("引擎超时未返回走法，已自动恢复，请继续走子。");
+        });
     }, timeout);
 }
 
@@ -777,64 +811,15 @@ Board.prototype.clearBusyWatchdog = function () {
 }
 
 Board.prototype.response = function () {
-    if (this.search == null || !this.computerMove()) {
+    // 重写后的统一入口：三个引擎全部走 EngineBridge 异步 Worker，主线程永不阻塞。
+    // 开局库/内置搜索/WASM 搜索都在 Worker 里做，主线程只负责收 BEST_MOVE 落子。
+    // 任何引擎失败都走同一条 catch：内置 Worker 炸了就用主线程同步兜底一步，
+    // WASM 炸了就用 xqw Worker 代走一步，保证对局永远不断。
+    if (!this.computerMove()) {
         this.busy = false;
         this.busySince = 0;
         return;
     }
-    // 开局库: 开局阶段直接按谱出子, 既快又稳 (不调用引擎, 不降棋力)
-    if (this.useBook && this.pos.mvList.length <= 12) {
-        var mvBook = this.pos.bookMove();
-        if (mvBook > 0) {
-            this.addMove(mvBook, true);
-            return;
-        }
-    }
-    this.thinking.style.visibility = "visible";
-    this.busy = true;
-    this.busySince = new Date().getTime();
-    this.thinkingSeq = (this.thinkingSeq + 1) & 0xffff;
-    var seq = this.thinkingSeq;
-    this.armBusyWatchdog(seq);
-    var this_ = this;
-
-    if (this.engineId == "xqw") {
-        // 内置引擎: 同步搜索, 100ms 后开始思考
-        this.thinkingTimer = setTimeout(function () {
-            // 悔棋/重开/换引擎后这个定时器已经作废：不做任何事。
-            // 原先继续跑 searchMain，会在新局面下再走一步"鬼步"，
-            // 与新局面真正的引擎搜索串在一起，把 busy 与走子顺序全打乱。
-            if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
-                return;
-            }
-            this_.thinkingTimer = 0;
-            this_.search.useBook = this_.useBook;
-            var mv = 0;
-            try {
-                mv = this_.search.searchMain(LIMIT_DEPTH, this_.thinkMillis());
-            } catch (e) {
-                mv = 0;
-            }
-            // 放弃局面变化后的迟到结果：只认本轮 seq，过期结果直接丢
-            if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
-                return;
-            }
-            // 搜索异常/超时未给出走法时，用第一个合法走法兜底。
-            // 不做这层保护一旦抛异常就会跳过下面的 busy=false，棋盘永久点不动。
-            if (mv <= 0 || !this_.pos.legalMove(mv)) {
-                mv = this_.firstLegalMove();
-            }
-            this_.clearBusyWatchdog();
-            this_.thinking.style.visibility = "hidden";
-            this_.busy = false;
-            this_.busySince = 0;
-            if (mv > 0) {
-                this_.addMove(mv, true);
-            }
-        }, 100);
-        return;
-    }
-
     if (typeof EngineBridge == "undefined" || typeof iccs2Move != "function") {
         this.clearBusyWatchdog();
         this.thinking.style.visibility = "hidden";
@@ -843,18 +828,25 @@ Board.prototype.response = function () {
         alert("外部引擎组件缺失，请改回内置引擎。");
         return;
     }
+    var engId = this.engineId || "xqw";
+    this.thinking.style.visibility = "visible";
+    this.busy = true;
+    this.busySince = new Date().getTime();
+    this.thinkingSeq = (this.thinkingSeq + 1) & 0xffff;
+    var seq = this.thinkingSeq;
+    this.armBusyWatchdog(seq);
+    var this_ = this;
 
-    // WASM 引擎: 异步在 Worker 中搜索
-    // file:// 下若 WASM 引擎还没就绪/加载失败，不让棋盘卡在 busy，直接回退内置引擎走子
     this.pendingWasmFen = this.pos.toFen();
     var selfFen = this.pendingWasmFen;
     // 换引擎时旧引擎的搜索不作数：记下当前引擎 id，回来发现引擎已换就直接丢弃。
     // 否则旧引擎的迟到 bestmove 可能冒充新引擎的着法落子，把局面搞乱。
-    var selfEngine = this.engineId;
-    EngineBridge.search(this.engineId, this.pendingWasmFen, this.thinkMillis()).then(function (iccs) {
+    var selfEngine = engId;
+    var thinkMs = this.thinkMillis();
+    EngineBridge.search(engId, this.pendingWasmFen, thinkMs, this.useBook).then(function (iccs) {
         // 搜索发出后局面已经变了（悔棋/重开/快速走子/换引擎），这条结果只能丢弃
         if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN ||
-            this_.pendingWasmFen !== selfFen || this_.engineId !== selfEngine) {
+            this_.pendingWasmFen !== selfFen || (this_.engineId || "xqw") !== selfEngine) {
             return;
         }
         this_.pendingWasmFen = null;
@@ -877,39 +869,61 @@ Board.prototype.response = function () {
         }
         this_.addMove(mv, true);
     }).catch(function (err) {
-        if (this_.thinkingSeq !== seq || this_.pendingWasmFen !== selfFen || this_.engineId !== selfEngine) {
+        if (this_.thinkingSeq !== seq || this_.pendingWasmFen !== selfFen || (this_.engineId || "xqw") !== selfEngine) {
             return;
         }
         this_.pendingWasmFen = null;
-        // 引擎不可用时静默回退内置引擎：file:// 双击场景下不弹窗打断对局
-        if (this_.search != null && this_.result == RESULT_UNKNOWN) {
-            var mv2 = 0;
-            try {
-                this_.search.useBook = this_.useBook;
-                mv2 = this_.search.searchMain(LIMIT_DEPTH, this_.thinkMillis());
-            } catch (e2) {
-                mv2 = 0;
-            }
+        // 任何引擎失败：WASM 炸了就用 xqw Worker 代走，xqw 炸了就用主线程同步兜底。
+        // 对局永远不断，不弹窗打断（只在消息区留一行）。
+        EngineBridge.search("xqw", this_.pos.toFen(), Math.min(thinkMs, 800), this_.useBook).then(function (iccs2) {
             if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
                 return;
             }
-            if (mv2 <= 0 || !this_.pos.legalMove(mv2)) {
-                mv2 = this_.firstLegalMove();
+            var mvF = iccs2Move(String(iccs2 || ""));
+            var okF = (mvF > 0 && this_.pos.legalMove(mvF)) ? this_.pos.makeMove(mvF) : false;
+            if (okF) {
+                this_.pos.undoMakeMove();
+            } else {
+                try { mvF = this_.firstLegalMove(); } catch (e3) { mvF = 0; }
+                if (mvF <= 0) {
+                    this_.clearBusyWatchdog();
+                    this_.thinking.style.visibility = "hidden";
+                    this_.busy = false;
+                    this_.busySince = 0;
+                    alertDelay("引擎出错且无合法走法，请点“重新开始”。");
+                    return;
+                }
             }
             this_.clearBusyWatchdog();
             this_.thinking.style.visibility = "hidden";
             this_.busy = false;
             this_.busySince = 0;
-            if (mv2 > 0) {
-                this_.addMove(mv2, true);
+            this_.addMove(mvF, true);
+        }, function () {
+            // xqw Worker 也失败：主线程同步 searchMain 最后一搏（300ms 内必返回）
+            var mvS = 0;
+            try {
+                if (this_.search != null) {
+                    this_.search.useBook = this_.useBook;
+                    mvS = this_.search.searchMain(LIMIT_DEPTH, 300);
+                }
+            } catch (eS) { mvS = 0; }
+            if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
                 return;
             }
-        }
-        this_.clearBusyWatchdog();
-        this_.thinking.style.visibility = "hidden";
-        this_.busy = false;
-        this_.busySince = 0;
-        alert("引擎出错：" + ((err && err.message) || err));
+            if (mvS <= 0 || !this_.pos.legalMove(mvS)) {
+                try { mvS = this_.firstLegalMove(); } catch (e4) { mvS = 0; }
+            }
+            this_.clearBusyWatchdog();
+            this_.thinking.style.visibility = "hidden";
+            this_.busy = false;
+            this_.busySince = 0;
+            if (mvS > 0) {
+                this_.addMove(mvS, true);
+                return;
+            }
+            alertDelay("引擎出错且无合法走法，请点“重新开始”。");
+        });
     });
 }
 
@@ -918,9 +932,9 @@ Board.prototype.cancelThinking = function () {
     this.hintSeq = (this.hintSeq + 1) & 0xffff;
     this.clearBusyWatchdog();
     this.pendingWasmFen = null;
-    // 停掉 WASM 引擎正在跑的搜索：悔棋/重开时旧思考必须真正停止，
+    // 停掉当前引擎正在跑的搜索：悔棋/重开时旧思考必须真正停止，
     // 否则它的迟到 BEST_MOVE 会和新局面串在一起，把 busy 卡死
-    if (typeof EngineBridge != "undefined" && this.engineId != "xqw" && this.engineId) {
+    if (typeof EngineBridge != "undefined" && this.engineId) {
         try {
             EngineBridge.stop(this.engineId);
         } catch (e) { /* ignore */
@@ -1008,7 +1022,7 @@ Board.prototype.restart = function (fen) {
     this.animStart = 0;
     this.pendingWasmFen = null;
     try {
-        if (typeof EngineBridge != "undefined" && this.engineId != "xqw" && this.engineId) {
+        if (typeof EngineBridge != "undefined" && this.engineId) {
             EngineBridge.reset(this.engineId);
         }
     } catch (e0) { /* ignore */ }

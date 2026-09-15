@@ -22,7 +22,7 @@ Worker 双通道:
 "use strict";
 
 var ENGINE_LIST = [
-  { id: "xqw", name: "象棋巫师（内置 JS）", wasm: false },
+  { id: "xqw", name: "象棋巫师（内置）", worker: "js/engines/xqw/xqw.worker.js?v=1" },
   { id: "eleeye", name: "象眼 ElephantEye（WASM）", wasm: true,
     worker: "js/engines/eleeye/eleeye.worker.js?v=13",
     bundle: "js/engines/eleeye/eleeye-bundle.js", bundleGlobal: "ELEEYE_BUNDLE" },
@@ -268,12 +268,34 @@ var EngineBridge = (function () {
     var st = state(id);
     var info = engineInfo(id);
     return new Promise(function (resolve, reject) {
-      if (!info || !info.wasm) {
+      if (!info) {
         reject(new Error("未知引擎: " + id));
         return;
       }
       if (typeof Worker == "undefined") {
-        reject(new Error("当前环境不支持 Web Worker，无法使用 WASM 引擎"));
+        reject(new Error("当前环境不支持 Web Worker，无法使用后台引擎"));
+        return;
+      }
+      // xqw 内置引擎同样走 Worker：原生 Worker 直接加载 xqw.worker.js，
+      // 它用 importScripts 拉 book/position/search/cchess，无任何外部依赖。
+      if (id === "xqw") {
+        var xw = null;
+        try {
+          xw = new Worker(info.worker);
+        } catch (e) {
+          xw = null;
+        }
+        if (xw) {
+          st.mode = "native";
+          attachWorker(id, xw);
+          resolve();
+          return;
+        }
+        reject(new Error("当前环境无法创建引擎线程"));
+        return;
+      }
+      if (!info.wasm) {
+        reject(new Error("未知引擎: " + id));
         return;
       }
       if (!isFileProtocol()) {
@@ -317,13 +339,10 @@ var EngineBridge = (function () {
 
   function load(id) {
     var st = state(id);
-    if (id === "xqw") {
-      st.ready = true;
-      return Promise.resolve();
-    }
     if (st.promise) {
       return st.promise;
     }
+    var timeoutMs = (id === "xqw") ? 15000 : 45000;
     st.promise = new Promise(function (resolve, reject) {
       st._resolve = resolve;
       st._reject = reject;
@@ -341,7 +360,7 @@ var EngineBridge = (function () {
             st._reject = null;
           }
         }
-      }, 45000);
+      }, timeoutMs);
     });
     return st.promise;
   }
@@ -385,9 +404,6 @@ var EngineBridge = (function () {
 
   function unload(id) {
     var st = state(id);
-    if (id === "xqw") {
-      return;
-    }
     if (st.rejectTimer) {
       clearTimeout(st.rejectTimer);
       st.rejectTimer = null;
@@ -404,7 +420,19 @@ var EngineBridge = (function () {
     st._reject = null;
   }
 
-  function search(id, fen, movetime) {
+  // 统一 SEARCH 消息体：xqw 多带 useBook（开局库开关），WASM 引擎忽略多余字段
+  function searchPayload(fen, movetime, seq, useBook) {
+    return {
+      type: "SEARCH",
+      fen: fen.indexOf(" - ") < 0 ? fen + FEN_EXTRA : fen,
+      movetime: movetime || 500,
+      seq: seq,
+      allowChase: ruleOpts.allowChase !== false,
+      useBook: useBook !== false
+    };
+  }
+
+  function search(id, fen, movetime, useBook) {
     return new Promise(function (resolve, reject) {
       var st = state(id);
       var seq = ++seqAlloc;
@@ -425,13 +453,7 @@ var EngineBridge = (function () {
             if (state(id).ready && state(id).worker && searches[seq]) {
               st.seq = seq;
               try {
-                state(id).worker.postMessage({
-                  type: "SEARCH",
-                  fen: fen.indexOf(" - ") < 0 ? fen + FEN_EXTRA : fen,
-                  movetime: movetime || 500,
-                  seq: seq,
-                  allowChase: ruleOpts.allowChase !== false
-                });
+                state(id).worker.postMessage(searchPayload(fen, movetime, seq, useBook));
               } catch (e) {
                 failFast(e);
               }
@@ -445,13 +467,7 @@ var EngineBridge = (function () {
         }
         st.seq = seq;
         try {
-          st.worker.postMessage({
-            type: "SEARCH",
-            fen: fen.indexOf(" - ") < 0 ? fen + FEN_EXTRA : fen,
-            movetime: movetime || 500,
-            seq: seq,
-            allowChase: ruleOpts.allowChase !== false
-          });
+          st.worker.postMessage(searchPayload(fen, movetime, seq, useBook));
         } catch (e) {
           failFast(e);
         }

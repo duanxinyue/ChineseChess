@@ -161,10 +161,6 @@ function retract_click() {
 
 // 支招：让引擎快速算一手，并高亮提示
 function hint_click() {
-  if (board.search == null) {
-    alert("支招需要启用搜索引擎（请选择“电脑先走”并重新开始）。");
-    return;
-  }
   if (board.result != RESULT_UNKNOWN) {
     alert("对局已结束，无法支招。");
     return;
@@ -198,48 +194,28 @@ function hint_click() {
 }
 
 // 让当前引擎给出推荐走法（返回 Promise<内部走法>）
-// file:// 下 WASM 引擎不可用时，自动回退内置引擎，不弹窗打断
+// 重写后统一走 EngineBridge（含 xqw Worker），主线程永不跑同步搜索
 function requestBestMove(millis) {
   return new Promise(function (resolve, reject) {
-    if (board.engineId == "xqw") {
-      try {
-        var mv = board.search.searchMain(LIMIT_DEPTH, millis);
-        if (mv <= 0 || !board.pos.legalMove(mv)) {
-          var mvs = board.pos.generateMoves();
-          mv = mvs.length > 0 ? mvs[0] : 0;
-        }
-        resolve(mv);
-      } catch (e) {
-        reject(e);
-      }
-      return;
-    }
-    EngineBridge.search(board.engineId, board.pos.toFen(), millis).then(function (iccs) {
+    var fen = "";
+    try { fen = board.pos.toFen(); } catch (e0) { reject(e0); return; }
+    EngineBridge.search(board.engineId || "xqw", fen, millis, board.useBook).then(function (iccs) {
       var mv = iccs2Move(String(iccs || ""));
-      if (mv <= 0 || !board.pos.legalMove(mv)) {
-        var mvs = board.pos.generateMoves();
-        mv = mvs.length > 0 ? mvs[0] : 0;
+      if (mv > 0) {
+        var ok = board.pos.legalMove(mv) ? board.pos.makeMove(mv) : false;
+        if (ok) {
+          board.pos.undoMakeMove();
+          resolve(mv);
+          return;
+        }
       }
-      resolve(mv);
-    }, function (err) {
-      var isFile = false;
       try {
-        isFile = typeof location != "undefined" && location.protocol === "file:";
-      } catch (e) { /* ignore */ }
-      if (isFile && board.search != null) {
-        try {
-          var mv2 = board.search.searchMain(LIMIT_DEPTH, millis);
-          if (mv2 <= 0 || !board.pos.legalMove(mv2)) {
-            var mvs2 = board.pos.generateMoves();
-            mv2 = mvs2.length > 0 ? mvs2[0] : 0;
-          }
-          if (mv2 > 0) {
-            resolve(mv2);
-            return;
-          }
-        } catch (e2) { /* ignore, fall through to reject */ }
-      }
-      reject(err);
+        resolve(board.firstLegalMove());
+      } catch (e1) { reject(e1); }
+    }, function (err) {
+      try {
+        resolve(board.firstLegalMove());
+      } catch (e2) { reject(err); }
     });
   });
 }
@@ -292,8 +268,7 @@ function engine_change() {
 
 // 轮到电脑走且棋局未结束时, 让当前引擎从现有局面接着思考
 function kickEngine() {
-  if (!board.busy && board.result === RESULT_UNKNOWN &&
-      board.search != null && board.computerMove()) {
+  if (!board.busy && board.result === RESULT_UNKNOWN && board.computerMove()) {
     board.response();
   }
 }
