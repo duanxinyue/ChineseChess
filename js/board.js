@@ -225,8 +225,33 @@ Board.prototype.addMove = function (mv, computerMove) {
     if (!this.pos.legalMove(mv)) {
         return;
     }
+    // makeMove 失败是"送将"类伪合法走法（被判例拒绝的长打也会走这里）。
+    // 原先直接 return 且上层已把 busy 复位，会造成"无人接管回合"：
+    // response() 不再被触发，界面停在电脑回合点哪都没用。
+    // 现在发现伪合法走法就拒绝它并把局面推进下去，保证轮到谁都有人走子。
     if (!this.pos.makeMove(mv)) {
         this.playSound("illegal");
+        if (computerMove) {
+            var fb = this.firstLegalMove();
+            if (fb > 0) {
+                this.pos.makeMove(fb);
+                this.hintMv = 0;
+                this.busy = true;
+                if (!this.animated) {
+                    this.postAddMove(fb, true);
+                    return;
+                }
+                this.startMoveAnimation(fb, true);
+                return;
+            }
+        }
+        this.busy = false;
+        this.busySince = 0;
+        this.clearBusyWatchdog();
+        this.thinking.style.visibility = "hidden";
+        if (computerMove) {
+            alertDelay("引擎走法被规则拒绝，请点“重新开始”。");
+        }
         return;
     }
     this.hintMv = 0;
@@ -236,6 +261,22 @@ Board.prototype.addMove = function (mv, computerMove) {
         return;
     }
 
+    this.startMoveAnimation(mv, computerMove);
+}
+
+// 第一个真正合法的走法（makeMove 实测通过），供各处兜底共用
+Board.prototype.firstLegalMove = function () {
+    var mvs = this.pos.generateMoves(null);
+    for (var i = 0; i < mvs.length; i++) {
+        if (this.pos.makeMove(mvs[i])) {
+            this.pos.undoMakeMove();
+            return mvs[i];
+        }
+    }
+    return 0;
+}
+
+Board.prototype.startMoveAnimation = function (mv, computerMove) {
     var sqSrc = this.flipped(SRC(mv));
     var xSrc = SQ_X(sqSrc);
     var ySrc = SQ_Y(sqSrc);
@@ -400,15 +441,7 @@ Board.prototype.armBusyWatchdog = function (seq) {
             mv2 = 0;
         }
         if (mv2 <= 0 || !this_.pos.legalMove(mv2)) {
-            var mvs2 = this_.pos.generateMoves(null);
-            mv2 = 0;
-            for (var i = 0; i < mvs2.length; i++) {
-                if (this_.pos.makeMove(mvs2[i])) {
-                    this_.pos.undoMakeMove();
-                    mv2 = mvs2[i];
-                    break;
-                }
-            }
+            mv2 = this_.firstLegalMove();
         }
         this_.thinking.style.visibility = "hidden";
         this_.busy = false;
@@ -454,6 +487,12 @@ Board.prototype.response = function () {
     if (this.engineId == "xqw") {
         // 内置引擎: 同步搜索, 100ms 后开始思考
         this.thinkingTimer = setTimeout(function () {
+            // 悔棋/重开/换引擎后这个定时器已经作废：不做任何事。
+            // 原先继续跑 searchMain，会在新局面下再走一步"鬼步"，
+            // 与新局面真正的引擎搜索串在一起，把 busy 与走子顺序全打乱。
+            if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
+                return;
+            }
             this_.thinkingTimer = 0;
             this_.search.useBook = this_.useBook;
             var mv = 0;
@@ -462,18 +501,14 @@ Board.prototype.response = function () {
             } catch (e) {
                 mv = 0;
             }
+            // 放弃局面变化后的迟到结果：只认本轮 seq，过期结果直接丢
+            if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
+                return;
+            }
             // 搜索异常/超时未给出走法时，用第一个合法走法兜底。
             // 不做这层保护一旦抛异常就会跳过下面的 busy=false，棋盘永久点不动。
             if (mv <= 0 || !this_.pos.legalMove(mv)) {
-                var mvs = this_.pos.generateMoves(null);
-                mv = 0;
-                for (var i = 0; i < mvs.length; i++) {
-                    if (this_.pos.makeMove(mvs[i])) {
-                        this_.pos.undoMakeMove();
-                        mv = mvs[i];
-                        break;
-                    }
-                }
+                mv = this_.firstLegalMove();
             }
             this_.clearBusyWatchdog();
             this_.thinking.style.visibility = "hidden";
@@ -519,15 +554,7 @@ Board.prototype.response = function () {
             }
         }
         if (!ok) {
-            var mvs = this_.pos.generateMoves(null);
-            mv = 0;
-            for (var i = 0; i < mvs.length; i++) {
-                if (this_.pos.makeMove(mvs[i])) {
-                    this_.pos.undoMakeMove();
-                    mv = mvs[i];
-                    break;
-                }
-            }
+            mv = this_.firstLegalMove();
             if (mv <= 0) {
                 alertDelay("引擎返回非法着法且无合法走法，请点“重新开始”。");
                 return;
@@ -547,16 +574,11 @@ Board.prototype.response = function () {
             } catch (e2) {
                 mv2 = 0;
             }
+            if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
+                return;
+            }
             if (mv2 <= 0 || !this_.pos.legalMove(mv2)) {
-                var mvs2 = this_.pos.generateMoves(null);
-                mv2 = 0;
-                for (var i = 0; i < mvs2.length; i++) {
-                    if (this_.pos.makeMove(mvs2[i])) {
-                        this_.pos.undoMakeMove();
-                        mv2 = mvs2[i];
-                        break;
-                    }
-                }
+                mv2 = this_.firstLegalMove();
             }
             this_.clearBusyWatchdog();
             this_.thinking.style.visibility = "hidden";
