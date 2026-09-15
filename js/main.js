@@ -194,76 +194,32 @@ function hint_click() {
 }
 
 // 让当前引擎给出推荐走法（返回 Promise<内部走法>）
-// 重写后统一走 EngineBridge（含 xqw Worker），主线程永不跑同步搜索
+// 原站没有支招走 Worker：同步算一步，高亮提示。简单可靠。
 function requestBestMove(millis) {
   return new Promise(function (resolve, reject) {
-    var fen = "";
-    try { fen = board.pos.toFen(); } catch (e0) { reject(e0); return; }
-    EngineBridge.search(board.engineId || "xqw", fen, millis, board.useBook).then(function (iccs) {
-      var mv = iccs2Move(String(iccs || ""));
+    try {
+      var mv = board.thinkSingleMove(millis || 400, board.useBook);
       if (mv > 0) {
-        var ok = board.pos.legalMove(mv) ? board.pos.makeMove(mv) : false;
-        if (ok) {
-          board.pos.undoMakeMove();
-          resolve(mv);
-          return;
-        }
+        resolve(mv);
+      } else {
+        reject(new Error("无合法走法"));
       }
-      try {
-        resolve(board.firstLegalMove());
-      } catch (e1) { reject(e1); }
-    }, function (err) {
-      try {
-        resolve(board.firstLegalMove());
-      } catch (e2) { reject(err); }
-    });
+    } catch (e) {
+      reject(e);
+    }
   });
 }
 
 /* ==================== 引擎切换 ==================== */
-
+// 原站没有“引擎”概念：只有一个内置 AI。保留下拉框只为兼容旧存档，
+// 切换只记选项+必要时补一步电脑思考，不碰 Worker、不碰局面，永不卡死。
 function engine_change() {
-  var sel = document.getElementById("selEngine");
-  var id = sel ? sel.options[sel.selectedIndex].value : "xqw";
-  if (typeof EngineBridge == "undefined" || !EngineBridge.supported(id)) {
-    id = "xqw";
-  }
-  var prevId = board.engineId;
-  // 中途换引擎不重开棋局: 先冻结旧思考并销毁旧 Worker（旧 bestmove 再也回不来），
-  // 再切引擎。切换瞬间棋盘永远可点，不会出现"换引擎换死"。
-  board.setEngine(id);
-  board.forceRecover();
+  board.engineId = "xqw";
   try {
-    localStorage.setItem("xiangqi_engine", id);
+    localStorage.setItem("xiangqi_engine", "xqw");
   } catch (e) { /* ignore */ }
   setEngStatus();
-  if (id == "xqw") {
-    kickEngine();
-    return;
-  }
-  EngineBridge.load(id).then(function () {
-    if (board.engineId !== id) {
-      return; // 等待加载期间用户又切回了别的引擎
-    }
-    setEngStatus();
-    kickEngine();
-  }, function (err) {
-    alert("引擎加载失败：" + ((err && err.message) || err) + "，已回退。");
-    if (sel) {
-      for (var i = 0; i < sel.options.length; i++) {
-        if (sel.options[i].value == prevId) {
-          sel.selectedIndex = i;
-          break;
-        }
-      }
-    }
-    try {
-      localStorage.setItem("xiangqi_engine", prevId);
-    } catch (e) { /* ignore */ }
-    board.setEngine(prevId);
-    setEngStatus();
-    kickEngine();
-  });
+  kickEngine();
 }
 
 // 轮到电脑走且棋局未结束时, 让当前引擎从现有局面接着思考
@@ -278,50 +234,24 @@ function setEngStatus() {
   if (!el) {
     return;
   }
-  if (board.engineId == "xqw") {
-    el.innerHTML = "";
-  } else if (EngineBridge.ready(board.engineId)) {
-    el.innerHTML = "（" + EngineBridge.displayName(board.engineId) + " 已就绪）";
-  } else {
-    el.innerHTML = "（" + EngineBridge.displayName(board.engineId) + " 加载中…）";
-  }
+  el.innerHTML = "";
 }
 
-// 恢复上次选择的引擎，并在后台预热 WASM 引擎
-// file:// 下 localStorage 可能存着上次的 pikafish/eleeye：只恢复下拉框显示，
-// 实际引擎启动一律从 xqw 开始（秒开、零依赖），用户手动切 WASM 时再加载。
-// 否则 file:// 双击开局就去解 6MB bundle，主线程被 fetch+解析冻住，
-// 第二步都走不出去——就是“出师未捷身先死”。
+// 原站同款：没有引擎预热。只把下拉框拨到 xqw，保证开局秒开。
 function restoreEngine() {
-  var saved = "xqw";
-  try {
-    saved = localStorage.getItem("xiangqi_engine") || "xqw";
-  } catch (e) { /* ignore */ }
+  board.engineId = "xqw";
   var sel = document.getElementById("selEngine");
   if (sel) {
     for (var i = 0; i < sel.options.length; i++) {
-      if (sel.options[i].value == saved) {
+      if (sel.options[i].value == "xqw") {
         sel.selectedIndex = i;
         break;
       }
     }
-    // file:// 下强制回到 xqw，避免开局预热 WASM 冻住页面
-    var isFile = false;
-    try {
-      isFile = typeof location != "undefined" && location.protocol === "file:";
-    } catch (e2) { /* ignore */ }
-    if (isFile && saved != "xqw") {
-      for (var j = 0; j < sel.options.length; j++) {
-        if (sel.options[j].value == "xqw") {
-          sel.selectedIndex = j;
-          break;
-        }
-      }
-      try {
-        localStorage.setItem("xiangqi_engine", "xqw");
-      } catch (e3) { /* ignore */ }
-    }
   }
+  try {
+    localStorage.setItem("xiangqi_engine", "xqw");
+  } catch (e) { /* ignore */ }
 }
 
 function moveList_change() {
