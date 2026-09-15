@@ -37,9 +37,9 @@ var THINKING_LEFT = (BOARD_WIDTH - THINKING_SIZE) >> 1;
 var THINKING_TOP = (BOARD_HEIGHT - THINKING_SIZE) >> 1;
 var MAX_STEP = 8;
 var PIECE_NAME = [
-  "oo", null, null, null, null, null, null, null,
-  "rk", "ra", "rb", "rn", "rr", "rc", "rp", null,
-  "bk", "ba", "bb", "bn", "br", "bc", "bp", null,
+    "oo", null, null, null, null, null, null, null,
+    "rk", "ra", "rb", "rn", "rr", "rc", "rp", null,
+    "bk", "ba", "bb", "bn", "br", "bc", "bp", null,
 ];
 
 function SQ_X(sq) {
@@ -145,7 +145,8 @@ Board.prototype.playSound = function (soundFile) {
         // 否则未捕获的 promise rejection 会打断后续走子回调。
         var p = new Audio(this.sounds + soundFile + ".wav").play();
         if (p && typeof p.catch === "function") {
-            p.catch(function () { /* ignore autoplay policy */ });
+            p.catch(function () { /* ignore autoplay policy */
+            });
         }
     } catch (e) {
         this.dummy.innerHTML = "<embed src=\"" + this.sounds + soundFile +
@@ -429,7 +430,8 @@ Board.prototype.armBusyWatchdog = function (seq) {
         if (typeof EngineBridge != "undefined" && this_.engineId != "xqw") {
             try {
                 EngineBridge.stop(this_.engineId);
-            } catch (e) { /* ignore */ }
+            } catch (e) { /* ignore */
+            }
         }
         var mv2 = 0;
         try {
@@ -532,10 +534,14 @@ Board.prototype.response = function () {
 
     // WASM 引擎: 异步在 Worker 中搜索
     // file:// 下若 WASM 引擎还没就绪/加载失败，不让棋盘卡在 busy，直接回退内置引擎走子
-    EngineBridge.search(this.engineId, this.pos.toFen(), this.thinkMillis()).then(function (iccs) {
-        if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN) {
+    this.pendingWasmFen = this.pos.toFen();
+    var selfFen = this.pendingWasmFen;
+    EngineBridge.search(this.engineId, this.pendingWasmFen, this.thinkMillis()).then(function (iccs) {
+        // 搜索发出后局面已经变了（悔棋/重开/快速走子/换引擎），这条结果只能丢弃
+        if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN || this_.pendingWasmFen !== selfFen) {
             return;
         }
+        this_.pendingWasmFen = null;
         this_.clearBusyWatchdog();
         this_.thinking.style.visibility = "hidden";
         this_.busy = false;
@@ -562,9 +568,10 @@ Board.prototype.response = function () {
         }
         this_.addMove(mv, true);
     }).catch(function (err) {
-        if (this_.thinkingSeq !== seq) {
+        if (this_.thinkingSeq !== seq || this_.pendingWasmFen !== selfFen) {
             return;
         }
+        this_.pendingWasmFen = null;
         // 引擎不可用时静默回退内置引擎：file:// 双击场景下不弹窗打断对局
         if (this_.search != null && this_.result == RESULT_UNKNOWN) {
             var mv2 = 0;
@@ -601,12 +608,14 @@ Board.prototype.cancelThinking = function () {
     this.thinkingSeq = (this.thinkingSeq + 1) & 0xffff;
     this.hintSeq = (this.hintSeq + 1) & 0xffff;
     this.clearBusyWatchdog();
+    this.pendingWasmFen = null;
     // 停掉 WASM 引擎正在跑的搜索：悔棋/重开时旧思考必须真正停止，
     // 否则它的迟到 BEST_MOVE 会和新局面串在一起，把 busy 卡死
     if (typeof EngineBridge != "undefined" && this.engineId != "xqw" && this.engineId) {
         try {
             EngineBridge.stop(this.engineId);
-        } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore */
+        }
     }
     if (this.thinkingTimer) {
         clearTimeout(this.thinkingTimer);
@@ -629,6 +638,17 @@ Board.prototype.cancelAnimation = function () {
 }
 
 Board.prototype.clickSquare = function (sq_) {
+    // 自愈保护：如果思考动画已隐藏、走子动画也已结束，却仍残留 busy，
+    // 说明上一轮回调在切引擎/快速点击竞态中漏清状态。不要让整个棋盘永久失去响应。
+    if (this.busy && this.thinking.style.visibility == "hidden" && !this.animTimer) {
+        this.busy = false;
+        this.busySince = 0;
+        this.clearBusyWatchdog();
+        if (this.result == RESULT_UNKNOWN && this.computerMove()) {
+            this.response();
+            return;
+        }
+    }
     if (this.busy || this.result != RESULT_UNKNOWN) {
         return;
     }

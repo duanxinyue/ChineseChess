@@ -349,6 +349,26 @@ var EngineBridge = (function () {
   // 取消指定引擎正在进行的搜索：悔棋/重开/换引擎/看门狗兜底时调用。
   // 让 Worker 停掉旧思考（UCI/UCCI 的 stop 指令），并清理主线程挂起的旧 seq，
   // 避免迟到的 BEST_MOVE 污染新局面。
+  function resetSearch(id) {
+    var st = state(id);
+    if (st.seq) {
+      delete searches[st.seq];
+      delete searches[st.seq + ":reject"];
+      st.seq = 0;
+    }
+    if (st.worker) {
+      try {
+        st.worker.terminate();
+      } catch (e) { /* ignore */ }
+    }
+    st.worker = null;
+    st.ready = false;
+    st.promise = null;
+    st.error = null;
+    st._resolve = null;
+    st._reject = null;
+  }
+
   function stop(id) {
     var st = state(id);
     if (st.seq) {
@@ -461,6 +481,7 @@ var EngineBridge = (function () {
   return {
     load: load,
     unload: unload,
+    reset: resetSearch,
     stop: stop,
     search: search,
     supported: supported,
