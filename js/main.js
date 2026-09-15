@@ -76,7 +76,13 @@ board.onAddMove = function() {
   } catch (e) {
     selMoveList.add(createOption(text, value, true));
   }
+  // 选中最新一手会让浏览器自动把它滚进可视区；
+  // 再在下一帧补一次 scrollTop，绕开 Chrome 对 <select> 同帧改 scrollTop 不生效的问题
+  selMoveList.selectedIndex = selMoveList.options.length - 1;
   selMoveList.scrollTop = selMoveList.scrollHeight;
+  requestAnimationFrame(function () {
+    selMoveList.scrollTop = selMoveList.scrollHeight;
+  });
 };
 
 function level_change() {
