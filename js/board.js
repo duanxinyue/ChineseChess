@@ -167,13 +167,15 @@ Board.prototype.setChaseAllowed = function (allowed) {
 }
 
 // 切换到指定引擎(WASM 引擎为异步走子)
+// 中途换引擎不重开局面：只换"谁来走下一步"，并清掉旧思考。
+// 换引擎后如果轮到电脑，由调用方(engine_change/kickEngine)决定是否立即思考。
 Board.prototype.setEngine = function (id) {
     if (typeof EngineBridge != "undefined") {
         var old = this.engineId;
         if (old !== id && EngineBridge.supported(old) && old !== "xqw") {
-            // 先停掉旧引擎正在跑的搜索再卸载，迟到的 BEST_MOVE 不会污染新引擎局面
-            EngineBridge.stop(old);
-            EngineBridge.unload(old);
+            // 先停掉旧引擎正在跑的搜索并销毁它的 Worker：
+            // 换引擎后旧引擎再吐 bestmove 也没人收，不会污染新引擎局面。
+            EngineBridge.reset(old);
         }
         if (!EngineBridge.supported(id)) {
             id = "xqw";
@@ -223,26 +225,36 @@ Board.prototype.thinkMillis = function () {
 }
 
 Board.prototype.addMove = function (mv, computerMove) {
+    // legalMove 失败(比如点到了不能走的格子、悔棋后选中的子已不在原位)时：
+    // 玩家走子只取消选中、不报错；电脑走子则用兜底走法保证对局推进。
     if (!this.pos.legalMove(mv)) {
+        if (computerMove) {
+            var fb0 = this.firstLegalMove();
+            if (fb0 > 0) {
+                this.doMakeMove(fb0, true);
+                return;
+            }
+            this.busy = false;
+            this.busySince = 0;
+            this.clearBusyWatchdog();
+            this.thinking.style.visibility = "hidden";
+            alertDelay("引擎走法被规则拒绝，请点“重新开始”。");
+            return;
+        }
+        if (this.sqSelected) {
+            this.drawSquare(this.sqSelected, false);
+            this.sqSelected = 0;
+        }
         return;
     }
     // makeMove 失败是"送将"类伪合法走法（被判例拒绝的长打也会走这里）。
-    // 原先直接 return 且上层已把 busy 复位，会造成"无人接管回合"：
-    // response() 不再被触发，界面停在电脑回合点哪都没用。
-    // 现在发现伪合法走法就拒绝它并把局面推进下去，保证轮到谁都有人走子。
+    // 电脑走子被拒时用兜底走法顶上，保证轮到谁都有人走子，不会停在电脑回合卡死。
     if (!this.pos.makeMove(mv)) {
         this.playSound("illegal");
         if (computerMove) {
             var fb = this.firstLegalMove();
             if (fb > 0) {
-                this.pos.makeMove(fb);
-                this.hintMv = 0;
-                this.busy = true;
-                if (!this.animated) {
-                    this.postAddMove(fb, true);
-                    return;
-                }
-                this.startMoveAnimation(fb, true);
+                this.doMakeMove(fb, true);
                 return;
             }
         }
@@ -252,9 +264,17 @@ Board.prototype.addMove = function (mv, computerMove) {
         this.thinking.style.visibility = "hidden";
         if (computerMove) {
             alertDelay("引擎走法被规则拒绝，请点“重新开始”。");
+        } else if (this.sqSelected) {
+            this.drawSquare(this.sqSelected, false);
+            this.sqSelected = 0;
         }
         return;
     }
+    this.doMakeMove(mv, computerMove);
+}
+
+// 走子已由 makeMove 生效：只负责动画/落子/切换回合
+Board.prototype.doMakeMove = function (mv, computerMove) {
     this.hintMv = 0;
     this.busy = true;
     if (!this.animated) {
@@ -536,9 +556,13 @@ Board.prototype.response = function () {
     // file:// 下若 WASM 引擎还没就绪/加载失败，不让棋盘卡在 busy，直接回退内置引擎走子
     this.pendingWasmFen = this.pos.toFen();
     var selfFen = this.pendingWasmFen;
+    // 换引擎时旧引擎的搜索不作数：记下当前引擎 id，回来发现引擎已换就直接丢弃。
+    // 否则旧引擎的迟到 bestmove 可能冒充新引擎的着法落子，把局面搞乱。
+    var selfEngine = this.engineId;
     EngineBridge.search(this.engineId, this.pendingWasmFen, this.thinkMillis()).then(function (iccs) {
         // 搜索发出后局面已经变了（悔棋/重开/快速走子/换引擎），这条结果只能丢弃
-        if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN || this_.pendingWasmFen !== selfFen) {
+        if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN ||
+            this_.pendingWasmFen !== selfFen || this_.engineId !== selfEngine) {
             return;
         }
         this_.pendingWasmFen = null;
@@ -547,19 +571,12 @@ Board.prototype.response = function () {
         this_.busy = false;
         this_.busySince = 0;
         var mv = iccs2Move(String(iccs || ""));
-        var ok = false;
-        if (mv > 0 && this_.pos.legalMove(mv)) {
-            // legalMove 只保证不是吃己方将，必须用 makeMove 实测（送将会被拒绝）。
-            // 引擎切引擎/重开后可能返回与当前局面不符的"鬼步"，
-            // 不实测就直接 addMove 会被静默拒绝，电脑回合无人接管 → 棋盘永久卡死。
-            ok = this_.pos.makeMove(mv);
-            if (ok) {
-                this_.pos.undoMakeMove();
-            } else {
-                mv = 0;
-            }
-        }
-        if (!ok) {
+        // 引擎着法必须用 makeMove 实测（送将/换引擎后的鬼步会被拒绝）。
+        // 实测失败就用第一步真合法走法兜底，对局一定能推进，电脑回合不会无人接管。
+        var tested = (mv > 0 && this_.pos.legalMove(mv)) ? this_.pos.makeMove(mv) : false;
+        if (tested) {
+            this_.pos.undoMakeMove();
+        } else {
             mv = this_.firstLegalMove();
             if (mv <= 0) {
                 alertDelay("引擎返回非法着法且无合法走法，请点“重新开始”。");
@@ -568,7 +585,7 @@ Board.prototype.response = function () {
         }
         this_.addMove(mv, true);
     }).catch(function (err) {
-        if (this_.thinkingSeq !== seq || this_.pendingWasmFen !== selfFen) {
+        if (this_.thinkingSeq !== seq || this_.pendingWasmFen !== selfFen || this_.engineId !== selfEngine) {
             return;
         }
         this_.pendingWasmFen = null;
