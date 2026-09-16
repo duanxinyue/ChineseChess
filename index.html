@@ -90,15 +90,6 @@
                                                 <option value="2">不用电脑</option>
                                             </select>
                                         </label>
-                                        <label class="fld">
-                                            <span class="fld-name">先走让子</span>
-                                            <select id="selHandicap" onchange="restart_click()">
-                                                <option selected value="0">不让子</option>
-                                                <option value="1">让左马</option>
-                                                <option value="2">让双马</option>
-                                                <option value="3">让九子</option>
-                                            </select>
-                                        </label>
                                         <div class="btn-row">
                                             <button type="button" onclick="restart_click()">重新开始</button>
                                             <button type="button" onclick="retract_click()">悔棋</button>
@@ -114,11 +105,7 @@
                                         </div>
                                     </div>
                                     <div class="panel-sec sec-engine">
-                                        <div class="sec-title">引擎与棋力</div>
-                                        <label class="fld">
-                                            <span class="fld-name">引擎</span>
-                                            <span class="fld-value">皮卡鱼 Pikafish（NNUE）</span>
-                                        </label>
+                                        <div class="sec-title">棋 力</div>
                                         <div id="engStatus" class="eng-status"></div>
                                         <label class="fld">
                                             <span class="fld-name">电脑水平</span>

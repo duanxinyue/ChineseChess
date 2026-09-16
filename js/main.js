@@ -3,12 +3,8 @@
 // 唯一引擎：皮卡鱼 Pikafish（WASM + NNUE）
 var ENGINE_ID = "pikafish";
 
-var STARTUP_FEN = [
-  "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w",
-  "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKAB1R w",
-  "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/R1BAKAB1R w",
-  "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/9/1C5C1/9/RN2K2NR w",
-];
+// 标准开局
+var STARTUP_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w";
 
 function createOption(text, value, ie8) {
   var opt = document.createElement("option");
@@ -133,7 +129,7 @@ function restart_click() {
   selMoveList.selectedIndex = 0;
   board.reviewMode = false;
   applyMoveMode();
-  board.restart(STARTUP_FEN[selHandicap.selectedIndex]);
+  board.restart(STARTUP_FEN);
   var msgArea = document.getElementById("message_area_84423");
   if (msgArea) {
     msgArea.innerHTML = "";
@@ -299,7 +295,7 @@ function recordText() {
     "【与电脑下象棋】对局记录",
     "版本:1",
     "红方:" + (board.computer == 1 ? "人" : "电脑"),
-    "开局棋谱:" + STARTUP_FEN[selHandicap.selectedIndex],
+    "开局棋谱:" + STARTUP_FEN,
     "着法:" + moves.join(" "),
   ];
   return texts.join("\n") + "\n";

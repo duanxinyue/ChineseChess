@@ -229,14 +229,22 @@ Board.prototype.computerLastMove = function () {
     return 1 - this.pos.sdPlayer == this.computer;
 }
 
-// 查询当前棋盘是否"真卡死"：思考动画已藏、思考定时器没跑、
-// 动画定时器没跑（或跑了超过 1.5 秒还没播完），却还占着 busy。
+// 查询当前棋盘是否"真卡死"。三种卡死形态都会返回 true：
+//  1. 思考图标已藏、动画没跑，但 busy 没释放——典型"引擎回调丢了"。
+//  2. 思考图标显示着，但 busySince 距今已远超正常预算——Worker 可能已挂死。
+//  3. 动画超时（>1.5s）没播完。
 // 疯狂测试脚本和页面自检共用这个判断，避免各写一套标准打架。
 Board.prototype.isStuck = function () {
     if (!this.busy || this.result != RESULT_UNKNOWN) {
         return false;
     }
+    // 正常搜索一般在 budget+2s 内返回；给 8 秒余量足够覆盖大多数异常
+    var STUCK_TIMEOUT = 8000;
     if (this.thinking.style.visibility != "hidden" || this.thinkingTimer) {
+        var since = this.busySince || 0;
+        if (since && (new Date().getTime() - since) > STUCK_TIMEOUT) {
+            return true; // 思考图标亮着但已超预算——Worker 可能已挂死
+        }
         return false;
     }
     if (!this.animTimer) {
@@ -285,6 +293,13 @@ Board.prototype.forceRecover = function () {
         try { this.drawSquare(this.sqSelected, false); } catch (e2) { /* ignore */ }
         this.sqSelected = 0;
     }
+    // 触发 forceRecover 说明当前 Worker 大概率已不可信：
+    // reset 后下一次 response() 会自动走 EngineBridge.load 重载新 Worker。
+    try {
+        if (typeof EngineBridge != "undefined" && EngineBridge.reset) {
+            EngineBridge.reset(this.engineId);
+        }
+    } catch (eR) { /* ignore */ }
     if (this.result == RESULT_UNKNOWN && this.computerMove()) {
         try { this.response(); } catch (e3) { /* ignore */ }
     }
@@ -663,7 +678,7 @@ Board.prototype.armBusyWatchdog = function (seq) {
     } catch (e) {
         budget = this.millis || 400;
     }
-    var timeout = (budget || 400) + 20000;
+    var timeout = (budget || 400) + 8000;
     this.busyWatchdog = setTimeout(function () {
         this_.busyWatchdog = 0;
         if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN || !this_.busy) {
