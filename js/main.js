@@ -1,5 +1,8 @@
 "use strict";
 
+// 唯一引擎：皮卡鱼 Pikafish（WASM + NNUE）
+var ENGINE_ID = "pikafish";
+
 var STARTUP_FEN = [
   "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w",
   "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKAB1R w",
@@ -21,11 +24,10 @@ function createOption(text, value, ie8) {
 
 
 var board = new Board(container, "images/", "sounds/");
-board.setSearch(16);
 board.millis = 400;
 
 board.computer = 1;
-restoreEngine();
+initEngine();
 try {
   var savedMoveMode = localStorage.getItem("xiangqi_move_mode");
   if (savedMoveMode === "0" || savedMoveMode === "1" || savedMoveMode === "2") {
@@ -59,6 +61,10 @@ try {
 } catch (e) { /* ignore */ }
 if (typeof EngineBridge != "undefined" && EngineBridge.setRuleOptions) {
   EngineBridge.setRuleOptions({ allowChase: board.allowChase !== false });
+}
+// 恢复为"电脑先走"时立刻让皮卡鱼开一局
+if (board.computerMove() && board.result === RESULT_UNKNOWN) {
+  kickEngine();
 }
 board.onAddMove = function() {
   // 若在"导入回看"中走到中途就落子，截断后面已导入的着法，并按新局面继续
@@ -193,65 +199,60 @@ function hint_click() {
   });
 }
 
-// 让当前引擎给出推荐走法（返回 Promise<内部走法>）
-// 原站没有支招走 Worker：同步算一步，高亮提示。简单可靠。
+// 让皮卡鱼快速算一手推荐走法（返回 Promise<内部走法>）
 function requestBestMove(millis) {
-  return new Promise(function (resolve, reject) {
-    try {
-      var mv = board.thinkSingleMove(millis || 400, board.useBook);
-      if (mv > 0) {
-        resolve(mv);
-      } else {
-        reject(new Error("无合法走法"));
-      }
-    } catch (e) {
-      reject(e);
+  return EngineBridge.search(ENGINE_ID, board.pos.toFen(), millis || 400).then(function (iccs) {
+    var mv = iccs2Move(iccs);
+    if (mv > 0 && board.pos.legalMove(mv)) {
+      return mv;
     }
+    throw new Error("引擎走法异常");
   });
 }
 
-/* ==================== 引擎切换 ==================== */
-// 原站没有“引擎”概念：只有一个内置 AI。保留下拉框只为兼容旧存档，
-// 切换只记选项+必要时补一步电脑思考，不碰 Worker、不碰局面，永不卡死。
-function engine_change() {
-  board.engineId = "xqw";
-  try {
-    localStorage.setItem("xiangqi_engine", "xqw");
-  } catch (e) { /* ignore */ }
-  setEngStatus();
-  kickEngine();
-}
+/* ==================== 引擎（皮卡鱼 Pikafish） ==================== */
 
-// 轮到电脑走且棋局未结束时, 让当前引擎从现有局面接着思考
-function kickEngine() {
-  if (!board.busy && board.result === RESULT_UNKNOWN && board.computerMove()) {
-    board.response();
-  }
-}
-
-function setEngStatus() {
+function setEngStatus(st, err) {
   var el = document.getElementById("engStatus");
   if (!el) {
     return;
   }
-  el.innerHTML = "";
+  if (st === "loading") {
+    el.innerHTML = '<span style="color:#9a7b4f">皮卡鱼引擎加载中…</span>';
+  } else if (st === "ready") {
+    var suffix = "";
+    try {
+      suffix = EngineBridge.mode(ENGINE_ID) === "blob" ? "（离线兼容模式）" : "";
+    } catch (e) { /* ignore */ }
+    el.innerHTML = '<span style="color:#2e7d32">皮卡鱼已就绪' + suffix + "</span>";
+  } else {
+    var tip = String((err && err.message) || err || "").replace(/"/g, "&#34;");
+    el.innerHTML = '<span style="color:#c0392b" title="' + tip +
+        '">引擎加载失败，对局将自动补走</span>';
+  }
 }
 
-// 原站同款：没有引擎预热。只把下拉框拨到 xqw，保证开局秒开。
-function restoreEngine() {
-  board.engineId = "xqw";
-  var sel = document.getElementById("selEngine");
-  if (sel) {
-    for (var i = 0; i < sel.options.length; i++) {
-      if (sel.options[i].value == "xqw") {
-        sel.selectedIndex = i;
-        break;
-      }
-    }
-  }
+// 唯一引擎皮卡鱼：页面打开即预热 Worker（http 原生 Worker / file:// 自动 Blob 降级），
+// 玩家走第一步时引擎通常已就绪，脱谱第一手不必干等加载。
+function initEngine() {
+  board.engineId = ENGINE_ID;
+  setEngStatus("loading");
   try {
-    localStorage.setItem("xiangqi_engine", "xqw");
-  } catch (e) { /* ignore */ }
+    EngineBridge.load(ENGINE_ID).then(function () {
+      setEngStatus("ready");
+    }, function (err) {
+      setEngStatus("error", err);
+    });
+  } catch (e) {
+    setEngStatus("error", e);
+  }
+}
+
+// 轮到电脑走且棋局未结束时, 让皮卡鱼从现有局面接着思考
+function kickEngine() {
+  if (!board.busy && board.result === RESULT_UNKNOWN && board.computerMove()) {
+    board.response();
+  }
 }
 
 function moveList_change() {
@@ -341,13 +342,7 @@ function importFile_click() {
   reader.readAsText(file, "utf-8");
 }
 
-// 把 ICCS 记法（如 h2-e2、H2E2）转换为内部走法；解析失败返回 0
-function iccs2Move(text) {
-  var m = String(text).trim().toLowerCase().match(/^([a-i])([0-9])-?([a-i])([0-9])$/);
-  if (!m) return 0;
-  return MOVE(COORD_XY(m[1].charCodeAt(0) - 94, 60 - m[2].charCodeAt(0)),
-              COORD_XY(m[3].charCodeAt(0) - 94, 60 - m[4].charCodeAt(0)));
-}
+// iccs2Move 由 cchess.js 提供（ICCS 记法转内部走法）
 
 function loadRecord(text) {
   var fen = "";

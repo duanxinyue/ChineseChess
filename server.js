@@ -14,6 +14,8 @@ const MIME = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.wav': 'audio/wav',
+  '.wasm': 'application/wasm',
+  '.data': 'application/octet-stream',
   '.svg': 'image/svg+xml',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',

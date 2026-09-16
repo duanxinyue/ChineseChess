@@ -17,6 +17,17 @@ function move2Iccs(mv) {
       CHR(ASC("9") - RANK_Y(sqDst) + RANK_TOP);
 }
 
+// ICCS 记法（如 h2-e2、H2E2）转内部走法；格式非法返回 0
+// 依赖 position.js 的 COORD_XY
+function iccs2Move(text) {
+  var m = String(text).trim().toLowerCase().match(/^([a-i])([0-9])-?([a-i])([0-9])$/);
+  if (!m) {
+    return 0;
+  }
+  return MOVE(COORD_XY(m[1].charCodeAt(0) - 94, 60 - m[2].charCodeAt(0)),
+              COORD_XY(m[3].charCodeAt(0) - 94, 60 - m[4].charCodeAt(0)));
+}
+
 // 把内部走法翻译成中文着法，例如 炮二平五、马8进7、前车进一
 function moveToString(pos, mv) {
   var sqSrc = SRC(mv);

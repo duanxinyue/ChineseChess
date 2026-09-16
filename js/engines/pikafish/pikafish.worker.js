@@ -1,7 +1,7 @@
 /**
  * pikafish.worker.js - 皮卡鱼(Pikafish)WASM 引擎的 UCI 桥接 Worker
  *
- * 协议(与 eleeye.worker.js 保持一致):
+ * 协议(EngineBridge 统一消息格式):
  *   主线程 -> Worker:  { type: "INIT" }
  *                     { type: "SEARCH", fen, movetime, seq }
  *   Worker -> 主线程:  { type: "READY" }

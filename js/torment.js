@@ -1,6 +1,6 @@
 "use strict";
 // 商业级惨无人道压测 v2: 你说的极端操作全部编成用例
-// 每走一步换引擎 + 切视角 + 悔棋 + 记录回看 + 重开, 循环轰炸
+// 每走一步切视角 + 悔棋 + 记录回看 + 重开, 循环轰炸（纯局面规则层，引擎在 Worker 内由 e2e 覆盖）
 // 跑法: node js/torment.js
 const fs = require("fs");
 const path = require("path");
@@ -17,7 +17,6 @@ global.document = { getElementById: () => null, createElement: () => ({ style: {
 
 load("book.js");
 load("position.js");
-load("search.js");
 load("cchess.js");
 
 let fail = 0, checks = 0;
@@ -95,29 +94,29 @@ console.log("== A. 开局44着法 ==");
   }
 }
 
-console.log("== B. 极端连击: 每步=走子+换引擎(换search对象)+切视角(mirror)+悔棋+记录回看 ==");
+console.log("== B. 极端连击: 每步=走子+切视角(mirror)+悔棋+记录回看 ==");
 {
   let moves = 0, fallbacks = 0, stuck = 0;
-  const ENGINES = ["xqw", "eleeye", "pikafish"];
+  // 随机一个真正合法的走法（模拟真人/引擎落子），30 次随机不中就用兜底首着
+  function randomLegalMove(pos) {
+    const all = pos.generateMoves(null);
+    for (let t = 0; t < 30 && all.length; t++) {
+      const c = all[(Math.random() * all.length) | 0];
+      if (pos.legalMove(c)) return c;
+    }
+    return firstLegalMove(pos);
+  }
   for (let g = 0; g < 60; g++) {
     const p = new Position(); p.fromFen(START);
-    const s = new Search(p, 8); s.useBook = true;
     let hist = [0]; // 记录列表 values
-    let engineIdx = g % 3;
     for (let step = 0; step < 40; step++) {
       if (p.isMate()) break;
-      // 1) 走一步（轮流随机/搜索，模拟人与电脑交替）
+      // 1) 走一步（轮流首着/随机着，模拟人与电脑交替）
       let mv = 0;
       if (step % 2 === 0) {
-        try { mv = s.searchMain(3, 25); } catch (e) { mv = 0; }
-        if (!mv || !p.legalMove(mv)) mv = firstLegalMove(p);
+        mv = firstLegalMove(p);
       } else {
-        const all = p.generateMoves(null);
-        for (let t = 0; t < 30 && all.length; t++) {
-          const c = all[(Math.random() * all.length) | 0];
-          if (p.legalMove(c)) { mv = c; break; }
-        }
-        if (!mv) mv = firstLegalMove(p);
+        mv = randomLegalMove(p);
       }
       if (!mv) break;
       const r = addMoveSim(p, mv, step % 2 === 0);
@@ -126,13 +125,10 @@ console.log("== B. 极端连击: 每步=走子+换引擎(换search对象)+切视
       if (r === "nomove") { stuck++; break; }
       if (r === "ok" || r === "fallback") { hist.push(p.mvList[p.mvList.length - 1]); moves++; }
       assert(stacksOk(p), `g${g}s${step} 栈错位`);
-      // 2) 每步换引擎：换 search 对象（useBook开关/深度抖动），旧思考作废
-      engineIdx = (engineIdx + 1) % 3;
-      s.useBook = engineIdx !== 2;
-      // 3) 切视角：mirror 必须返回等价局面且不抛错
+      // 2) 切视角：mirror 必须返回等价局面且不抛错
       const mir = p.mirror();
       assert(mir instanceof Position, "mirror类型");
-      // 4) 悔1~2次再用记录回看点回来（模拟你在记录列表里乱点）
+      // 3) 悔1~2次再用记录回看点回来（模拟你在记录列表里乱点）
       if (step % 3 === 2 && p.mvList.length > 2) {
         p.undoMakeMove();
         if (p.mvList.length > 2 && step % 2 === 0) p.undoMakeMove();
@@ -146,7 +142,7 @@ console.log("== B. 极端连击: 每步=走子+换引擎(换search对象)+切视
         const nm = firstLegalMove(p);
         assert(nm > 0 || p.isMate(), `g${g}s${step} 回看后无子可走`);
       }
-      // 5) 每5步重开一局（fromFen），旧残留必须清零
+      // 4) 每5步重开一局（fromFen），旧残留必须清零
       if (step % 10 === 9) {
         p.fromFen(START);
         hist = [0];

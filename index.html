@@ -60,7 +60,6 @@
     <div class="main">
         <script defer src="js/book.js"></script>
         <script defer src="js/position.js"></script>
-        <script defer src="js/search.js"></script>
         <script defer src="js/board.js"></script>
         <script defer src="js/cchess.js"></script>
         <script defer src="js/engine.js"></script>
@@ -118,11 +117,7 @@
                                         <div class="sec-title">引擎与棋力</div>
                                         <label class="fld">
                                             <span class="fld-name">引擎</span>
-                                            <select id="selEngine" onchange="engine_change()">
-                                                <option value="xqw" selected>象棋巫师（内置）</option>
-                                                <option value="eleeye">象眼 ElephantEye</option>
-                                                <option value="pikafish">皮卡鱼 Pikafish</option>
-                                            </select>
+                                            <span class="fld-value">皮卡鱼 Pikafish（NNUE）</span>
                                         </label>
                                         <div id="engStatus" class="eng-status"></div>
                                         <label class="fld">

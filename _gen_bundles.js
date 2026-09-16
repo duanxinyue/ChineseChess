@@ -14,12 +14,6 @@ const out = {
     wasm: b64(fs.readFileSync('js/engines/pikafish/pikafish.wasm')),
     data: b64(fs.readFileSync('js/engines/pikafish/pikafish.data')),
   },
-  eleeye: {
-    file: 'js/engines/eleeye/eleeye-bundle.js',
-    global: 'ELEEYE_BUNDLE',
-    js: fs.readFileSync('js/engines/eleeye/eleeye.js', 'utf8'),
-    wasm: b64(fs.readFileSync('js/engines/eleeye/eleeye.wasm')),
-  },
 };
 
 for (const key of Object.keys(out)) {

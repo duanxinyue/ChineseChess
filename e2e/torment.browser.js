@@ -62,13 +62,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(1500);
   console.log("[e2e] page ready");
 
-  // file:// 双击场景复刻：file 协议下 new Worker(相对路径) 被浏览器直接禁止，
-  // 引擎必须走 Blob 降级 + 主线程兜底，对局不能锁死
-  async function fileProtoProbe() {
+  // 引擎探针：原生 Worker 可用性 + Blob Worker 可用性 + 皮卡鱼真实搜索返回合法 ICCS
+  async function engineProbe() {
     const r = await page.evaluate(async () => {
-      const out = { workerNewOk: "unknown", blobOk: "unknown", xqwSearch: "unknown" };
+      const out = { workerNewOk: "unknown", blobOk: "unknown", pikaSearch: "unknown" };
       try {
-        const w = new Worker("js/engines/xqw/xqw.worker.js");
+        const w = new Worker("js/engines/pikafish/pikafish.worker.js");
         w.terminate();
         out.workerNewOk = true;
       } catch (e) { out.workerNewOk = false; }
@@ -79,23 +78,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       } catch (e) { out.blobOk = false; }
       try {
         const fen = board.pos.toFen();
-        const iccs = await EngineBridge.search("xqw", fen, 300, true);
-        out.xqwSearch = String(iccs || "");
-      } catch (e) { out.xqwSearch = "ERR:" + (e && e.message || e); }
+        const iccs = await EngineBridge.search("pikafish", fen, 300);
+        out.pikaSearch = String(iccs || "");
+      } catch (e) { out.pikaSearch = "ERR:" + (e && e.message || e); }
       return out;
     });
     console.log("[e2e] worker-probe:", JSON.stringify(r));
     return r;
   }
-  const probe = await fileProtoProbe();
+  const probe = await engineProbe();
 
-  // 测试脚本跑在页面里：每轮 = 玩家走一步(两次真实clickSquare) + 切引擎 + 切视角 + 悔棋 + 记录回看 + 偶数轮重开
+  // 测试脚本跑在页面里：每轮 = 玩家走一步(两次真实clickSquare) + 切视角 + 悔棋 + 记录回看 + 偶数轮重开
   const result = await page.evaluate(async () => {
     const log = [];
     const sleep_ = (ms) => new Promise((r) => setTimeout(r, ms));
     let stuckEvents = 0, actions = 0;
-    const engines = ["xqw", "eleeye", "pikafish"];
-    let engIdx = 0;
     const ROUNDS = 25;
     // 本轮要验证的局面指纹：走子/悔棋/回看前后 WtM 方与步数必须自洽
     let expectMoves = {};
@@ -131,7 +128,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         if (j === last && !board.computerMove() && board.result === 0 && !board.busy) {
           const mv = board.firstLegalMove();
           if (mv > 0) {
-            const src = board.flipped(mv >> 8), dst = board.flipped(mv & 255);
+            const src = board.flipped(mv & 255), dst = board.flipped(mv >> 8);
             board.clickSquare(src);
             await sleep_(100);
             board.clickSquare(dst);
@@ -154,7 +151,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         if (!board.computerMove() && board.result === 0) {
           const mv = board.firstLegalMove();
           if (mv > 0) {
-            const src = mv >> 8, dst = mv & 255;
+            // 注意本库 SRC(mv)=mv&255、DST(mv)=mv>>8
+            const src = mv & 255, dst = mv >> 8;
             const srcClick = board.flipped(src), dstClick = board.flipped(dst);
             board.clickSquare(srcClick); actions++;
             await sleep_(120);
@@ -163,25 +161,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           }
         }
       } catch (e) { log.push(`r${r} move fail: ${e.message}`); }
-      // 2) 每轮换一次引擎（含 WASM），换完等加载
+      // 2) 切一次视角
       try {
-        engIdx = (engIdx + 1) % engines.length;
-        const sel = document.getElementById("selEngine");
-        for (let i = 0; i < sel.options.length; i++) {
-          if (sel.options[i].value === engines[engIdx]) { sel.selectedIndex = i; break; }
-        }
-        engine_change(); actions++;
-        await sleep_(1200);
-      } catch (e) { log.push(`r${r} engine fail: ${e.message}`); }
-      // 3) 切一次视角
-      try {
-        const cb = document.querySelector("input[onclick*='viewport'], input[type='checkbox']");
         board.setViewport(!board.viewport); actions++;
       } catch (e) { log.push(`r${r} viewport fail: ${e.message}`); }
-      // 4) 悔一次棋
+      // 3) 悔一次棋
       try { retract_click(); actions++; await sleep_(500); }
       catch (e) { log.push(`r${r} retract fail: ${e.message}`); }
-      // 5) 记录回看：跳到中间再跳回来 + 乱点 fuzz
+      // 4) 记录回看：跳到中间再跳回来 + 乱点 fuzz
       try {
         await reviewChaos();
         // 支招键任何时候可点（busy 时弹提示也算正常，不准抛错/卡死）
@@ -190,7 +177,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         await sleep_(300);
         if (board.isStuck()) throw new Error("hint stuck");
       } catch (e) { log.push(`r${r} review fail: ${e.message}`); }
-      // 6) 偶数轮重开
+      // 5) 偶数轮重开
       try {
         if (r % 2 === 1) { restart_click(); actions++; await sleep_(700); }
       } catch (e) { log.push(`r${r} restart fail: ${e.message}`); }
@@ -219,13 +206,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   result.log.forEach((l) => console.log("[e2e]", l));
   console.log("[e2e] pageerrors=", errors.length);
   errors.slice(0, 20).forEach((e) => console.log("[e2e-err]", e));
-  // xqw Worker 必须真返回走法（不是空串/ERR），否则“重写根治”就是空话
-  const xqwOk = probe && typeof probe.xqwSearch === "string" &&
-    /^[a-i][0-9]-[a-i][0-9]$/i.test(probe.xqwSearch.trim());
+  // 皮卡鱼必须真返回走法（不是空串/ERR），否则引擎链路就是断的
+  const pikaOk = probe && typeof probe.pikaSearch === "string" &&
+    /^[a-i][0-9]-[a-i][0-9]$/i.test(probe.pikaSearch.trim());
 
   await browser.close();
   srv.close();
-  if (!xqwOk) { console.log("E2E-FAIL: xqw Worker 未返回合法走法: " + JSON.stringify(probe)); process.exit(1); }
+  if (!pikaOk) { console.log("E2E-FAIL: 皮卡鱼未返回合法走法: " + JSON.stringify(probe)); process.exit(1); }
   if (result.stuckEvents > 0) { console.log("E2E-FAIL: 真机撞出卡死 " + result.stuckEvents + " 次"); process.exit(1); }
-  console.log("E2E-OK: 真机 25 轮极端连击零卡死 + xqw Worker 着法 " + probe.xqwSearch);
+  console.log("E2E-OK: 真机 25 轮极端连击零卡死 + 皮卡鱼着法 " + probe.pikaSearch);
 })().catch((e) => { console.error("E2E-HARNESS-FAIL:", e.message); process.exit(2); });

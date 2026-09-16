@@ -112,7 +112,6 @@ function Board(container, images, sounds) {
     this.pos.fromFen("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1");
     this.animated = true;
     this.sound = true;
-    this.search = null;
     this.imgSquares = [];
     this.sqSelected = 0;
     this.mvLast = 0;
@@ -136,7 +135,7 @@ function Board(container, images, sounds) {
     this.pendingWasmFen = null;
     this.hintMv = 0;
     this.hintSeq = 0;
-    this.engineId = "xqw";
+    this.engineId = "pikafish";
 
     var style = container.style;
     style.position = "relative";
@@ -210,40 +209,12 @@ Board.prototype.playSound = function (soundFile) {
     }
 }
 
-Board.prototype.setSearch = function (hashLevel) {
-    this.search = hashLevel == 0 ? null : new Search(this.pos, hashLevel);
-}
-
-// 切换"允许长将长捉": 同步作用于棋盘判罚与内置引擎搜索; WASM 引擎判例随每次搜索下发
+// 切换"允许长将长捉": 同步作用于棋盘判罚; 皮卡鱼的判例随每次搜索下发
 Board.prototype.setChaseAllowed = function (allowed) {
     this.allowChase = !!allowed;
     if (this.pos) {
         this.pos.chaseAllowed = this.allowChase;
     }
-}
-
-// 切换到指定引擎(WASM 引擎为异步走子)
-// 中途换引擎不重开局面：只换"谁来走下一步"，并清掉旧思考。
-// 换引擎后如果轮到电脑，由调用方(engine_change/kickEngine)决定是否立即思考。
-Board.prototype.setEngine = function (id) {
-    if (typeof EngineBridge != "undefined") {
-        var old = this.engineId;
-        if (old && old !== id && EngineBridge.supported(old)) {
-            // 先停掉旧引擎正在跑的搜索并销毁它的 Worker：
-            // 换引擎后旧引擎再吐 bestmove 也没人收，不会污染新引擎局面。
-            EngineBridge.reset(old);
-        }
-        if (!EngineBridge.supported(id)) {
-            id = "xqw";
-        }
-    } else {
-        id = "xqw";
-    }
-    if (id === this.engineId && this.engineId !== "xqw") {
-        return;
-    }
-    this.cancelThinking();
-    this.engineId = id;
 }
 
 Board.prototype.flipped = function (sq) {
@@ -680,9 +651,9 @@ Board.prototype.postMate = function (computerMove) {
     this.busy = false;
 }
 
-// busy 看门狗：同步模型下只是保险。searchMain 自带硬时限必返回，
-// 所以正常情况 response() 早就走完、busy 早就释放，看门狗永远是空操作。
-// 万一真超时（比如某步 searchMain 被极端局面拖住），清状态保可点。
+// busy 看门狗：异步引擎模型下的最后保险。皮卡鱼正常应在 movetime 前后返回，
+// 一旦预算 +20 秒还没结算（Worker 崩溃/回调丢失），强制清状态并用合法走法兜底，
+// 同时销毁引擎实例，让下一手自动重载。任何时候重开/悔棋都会先摘掉看门狗。
 Board.prototype.armBusyWatchdog = function (seq) {
     this.clearBusyWatchdog();
     var this_ = this;
@@ -704,8 +675,15 @@ Board.prototype.armBusyWatchdog = function (seq) {
         this_.busy = false;
         this_.busySince = 0;
         try { this_.cancelAnimation(); } catch (eC) { /* ignore */ }
+        // 看门狗触发说明引擎回调已不可信：销毁旧 Worker，下一次思考自动重载
+        try {
+            if (typeof EngineBridge != "undefined") {
+                EngineBridge.reset(this_.engineId);
+            }
+        } catch (eE) { /* ignore */ }
         if (this_.result == RESULT_UNKNOWN && this_.computerMove()) {
-            var mvD = this_.thinkSingleMove(300, this_.useBook);
+            var mvD = 0;
+            try { mvD = this_.firstLegalMove(); } catch (eF) { mvD = 0; }
             if (mvD > 0) {
                 alertDelay("引擎超时，已自动补走一步。");
                 this_.addMove(mvD, true);
@@ -723,59 +701,115 @@ Board.prototype.clearBusyWatchdog = function () {
     }
 }
 
-Board.prototype.thinkSingleMove = function (millis, useBook) {
-    // 原站同款：主线程同步算一步（searchMain 自带硬时限，必返回）。
-    // 返回内部走法，失败返回 0。绝不抛错、绝不改 busy/动画，只碰 pos。
+// 开局库优先：命中谱着且不造成重复判罚时直接落子（原内置搜索 searchMain 的
+// 同款页面层闸门），脱谱后才把局面交给皮卡鱼。返回 true 表示已按谱着走子。
+Board.prototype.tryBookMove = function () {
+    if (!this.useBook) {
+        return false;
+    }
+    var bm = 0;
     try {
-        if (this.search == null) {
-            return 0;
-        }
-        this.search.useBook = (useBook !== false);
-        var mv = 0;
-        try {
-            mv = this.search.searchMain(LIMIT_DEPTH, millis || 400);
-        } catch (e) {
-            mv = 0;
-        }
-        if (mv > 0 && this.pos.legalMove(mv)) {
-            var ok = false;
-            try { ok = this.pos.makeMove(mv); } catch (e2) { ok = false; }
-            if (ok) {
-                try { this.pos.undoMakeMove(); } catch (e3) { /* ignore */ }
-                return mv;
+        bm = this.pos.bookMove();
+    } catch (e) {
+        return false;
+    }
+    if (!(bm > 0) || !this.pos.legalMove(bm)) {
+        return false;
+    }
+    try {
+        if (this.pos.makeMove(bm)) {
+            var rep = this.pos.repStatus(3);
+            this.pos.undoMakeMove();
+            if (rep == 0) {
+                this.addMove(bm, true);
+                return true;
             }
         }
-        try {
-            return this.firstLegalMove();
-        } catch (e4) {
-            return 0;
-        }
-    } catch (e5) {
-        return 0;
-    }
+    } catch (e2) { /* 谱着异常则脱谱交给引擎 */ }
+    return false;
 }
 
+// 引擎不可用时的最后兜底：走一步合法着法保证对局推进，无子可走则提示重开。
+Board.prototype.engineFallback = function (reason) {
+    var fb = 0;
+    try {
+        fb = this.firstLegalMove();
+    } catch (e) {
+        fb = 0;
+    }
+    if (fb > 0) {
+        alertDelay(reason + "，已自动补走一步。");
+        this.addMove(fb, true);
+        return;
+    }
+    this.busy = false;
+    this.busySince = 0;
+    alertDelay(reason + "，且无合法走法，请点“重新开始”。");
+}
+
+// 电脑走子：开局库谱着秒走；否则皮卡鱼 Worker 异步思考。
+// thinkingSeq 守卫作废所有迟到回调（悔棋/重开/看门狗），busy 看门狗与
+// firstLegalMove 兜底保证任何异常下棋盘都不锁死。
 Board.prototype.response = function () {
-    // 对标原站的极简模型：电脑回合 = 同步算一步 → 落子 → 交回玩家。
-    // 原站没有 Worker、没有 Promise、没有 seq，卡死的整条链路（pending/迟到
-    // bestmove/引擎身份错位/Blob 降级）全部不存在，从根上没有卡死的条件。
-    // 搜索跑在主线程时会短暂占住界面（小有成就约几百毫秒），这是原站同款行为；
-    // 但 searchMain 自带 pollTimeout 硬时限，必在预算内返回，busy 必释放。
     if (!this.computerMove()) {
         this.busy = false;
         this.busySince = 0;
         return;
     }
-    var mv = this.thinkSingleMove(this.thinkMillis(), this.useBook);
-    if (mv > 0) {
-        this.addMove(mv, true);
+    if (this.result != RESULT_UNKNOWN) {
         return;
     }
-    this.clearBusyWatchdog();
-    this.thinking.style.visibility = "hidden";
-    this.busy = false;
-    this.busySince = 0;
-    alertDelay("引擎出错且无合法走法，请点“重新开始”。");
+    // 1) 开局库闸门：有谱秒走
+    if (this.tryBookMove()) {
+        return;
+    }
+    // 2) 皮卡鱼异步思考
+    if (typeof EngineBridge == "undefined") {
+        this.engineFallback("引擎桥接层未加载");
+        return;
+    }
+    var self = this;
+    var seq = (this.thinkingSeq + 1) & 0xffff;
+    this.thinkingSeq = seq;
+    this.busy = true;
+    this.busySince = new Date().getTime();
+    this.thinking.style.visibility = "visible";
+    this.armBusyWatchdog(seq);
+    var fen = this.pos.toFen();
+    this.pendingWasmFen = fen;
+    var movetime = this.thinkMillis();
+    EngineBridge.search(this.engineId, fen, movetime).then(function (iccs) {
+        // 悔棋/重开/看门狗后迟到的结果：seq 不匹配，直接丢弃
+        if (self.thinkingSeq !== seq || self.result != RESULT_UNKNOWN || !self.computerMove()) {
+            return;
+        }
+        self.pendingWasmFen = null;
+        self.clearBusyWatchdog();
+        self.thinking.style.visibility = "hidden";
+        var mv = 0;
+        try {
+            mv = iccs2Move(iccs);
+        } catch (e) {
+            mv = 0;
+        }
+        if (mv > 0 && self.pos.legalMove(mv)) {
+            self.addMove(mv, true);
+            return;
+        }
+        // 空串/非法着法：销毁当前引擎实例（下一手自动重载），本手兜底
+        try { EngineBridge.reset(self.engineId); } catch (eR) { /* ignore */ }
+        self.engineFallback("引擎走法异常");
+    }, function (err) {
+        if (self.thinkingSeq !== seq || self.result != RESULT_UNKNOWN || !self.computerMove()) {
+            return;
+        }
+        self.pendingWasmFen = null;
+        self.clearBusyWatchdog();
+        self.thinking.style.visibility = "hidden";
+        // 加载失败/线程崩溃/思考超时：销毁引擎（下一手自动重载），本手兜底
+        try { EngineBridge.reset(self.engineId); } catch (eR) { /* ignore */ }
+        self.engineFallback("引擎无响应（" + ((err && err.message) || err) + "）");
+    });
 }
 
 Board.prototype.cancelThinking = function () {
@@ -872,11 +906,8 @@ Board.prototype.restart = function (fen) {
     this.cancelAnimation();
     this.animStart = 0;
     this.pendingWasmFen = null;
-    try {
-        if (typeof EngineBridge != "undefined" && this.engineId) {
-            EngineBridge.reset(this.engineId);
-        }
-    } catch (e0) { /* ignore */ }
+    // cancelThinking 已 EngineBridge.stop 旧思考；Worker 保持热装载，
+    // 重开后第一手不必重新初始化 WASM。
     this.thinking.style.visibility = "hidden";
     if (this.sqSelected) {
         this.drawSquare(this.sqSelected, false);

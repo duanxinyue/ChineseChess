@@ -62,7 +62,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await step(() => {
       if (!board.computerMove() && board.result === 0 && !board.busy) {
         const mv = board.firstLegalMove();
-        if (mv > 0) board.clickSquare(board.flipped(mv >> 8));
+        // 注意本库 SRC(mv)=mv&255、DST(mv)=mv>>8
+        if (mv > 0) board.clickSquare(board.flipped(mv & 255));
       }
     }, 15000);
     actions++;
@@ -70,7 +71,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await step(() => {
       if (!board.computerMove() && board.result === 0 && !board.busy && board.sqSelected) {
         const mv = board.firstLegalMove();
-        if (mv > 0) board.clickSquare(board.flipped(mv & 255));
+        if (mv > 0) board.clickSquare(board.flipped(mv >> 8));
       }
     }, 15000);
     actions++;
@@ -94,15 +95,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await step(() => { try { board.clickSquare(0); } catch (e) {} }, 15000);
     }
     if (r === 4) {
-      await step(() => {
-        try {
-          const sel = document.getElementById("selEngine");
-          sel.selectedIndex = (sel.selectedIndex + 1) % sel.options.length;
-          engine_change();
-        } catch (e) {}
-      }, 20000);
-      actions++;
-      await sleep(2000);
+      // 中途悔棋：旧思考必须被 stop，皮卡鱼 Worker 不能把迟到 bestmove 落到新局面
       await step(() => { try { retract_click(); } catch (e) {} }, 15000);
       actions++;
       await sleep(1000);
