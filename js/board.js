@@ -238,8 +238,8 @@ Board.prototype.isStuck = function () {
     if (!this.busy || this.result != RESULT_UNKNOWN) {
         return false;
     }
-    // 正常搜索一般在 budget+2s 内返回；给 8 秒余量足够覆盖大多数异常
-    var STUCK_TIMEOUT = 8000;
+    // 正常搜索一般在 budget 内返回；给 5 秒余量足够覆盖大多数异常
+    var STUCK_TIMEOUT = 5000;
     if (this.thinking.style.visibility != "hidden" || this.thinkingTimer) {
         var since = this.busySince || 0;
         if (since && (new Date().getTime() - since) > STUCK_TIMEOUT) {
@@ -678,7 +678,7 @@ Board.prototype.armBusyWatchdog = function (seq) {
     } catch (e) {
         budget = this.millis || 400;
     }
-    var timeout = (budget || 400) + 8000;
+    var timeout = (budget || 400) + 5000;
     this.busyWatchdog = setTimeout(function () {
         this_.busyWatchdog = 0;
         if (this_.thinkingSeq !== seq || this_.result != RESULT_UNKNOWN || !this_.busy) {
